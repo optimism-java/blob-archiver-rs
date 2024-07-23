@@ -1,0 +1,70 @@
+use std::collections::HashMap;
+
+use async_trait::async_trait;
+use eth2::types::{BeaconBlockHeader, BlobSidecarList, Hash256, MainnetEthSpec};
+use eyre::Result;
+use serde::{Deserialize, Serialize};
+use spin::Mutex;
+
+pub(crate) type BackfillProcesses = HashMap<Hash256, BackfillProcess>;
+pub(crate) static BACKFILL_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct BackfillProcess {
+    pub start_block: BeaconBlockHeader,
+    pub current_block: BeaconBlockHeader,
+}
+
+#[derive(Debug, PartialEq, Eq, Copy, Clone, Serialize, Deserialize)]
+pub struct Header {
+    pub beacon_block_hash: Hash256,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct BlobSidecars {
+    pub data: BlobSidecarList<MainnetEthSpec>,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct BlobData {
+    pub header: Header,
+    pub blob_sidecars: BlobSidecars,
+}
+
+impl BlobData {
+    pub fn new(header: Header, blob_sidecars: BlobSidecars) -> Self {
+        Self {
+            header,
+            blob_sidecars,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct LockFile {
+    pub archiver_id: String,
+    pub timestamp: u64,
+}
+
+#[async_trait]
+pub trait StorageReader {
+    async fn read_blob_data(&self, hash: Hash256) -> Result<BlobData>;
+
+    async fn exists(&self, hash: Hash256) -> bool;
+
+    async fn read_lock_file(&self) -> Result<LockFile>;
+
+    async fn read_backfill_processes(&self) -> Result<BackfillProcesses>;
+}
+
+#[async_trait]
+pub trait StorageWriter {
+    async fn write_blob_data(&self, blob_data: BlobData) -> Result<()>;
+
+    async fn write_lock_file(&self, lock_file: LockFile) -> Result<()>;
+
+    async fn write_backfill_process(&self, backfill_process: BackfillProcesses) -> Result<()>;
+}
+
+#[async_trait]
+pub trait Storage: StorageReader + StorageWriter {}
