@@ -2,17 +2,19 @@ use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use aws_sdk_s3::Client;
 use aws_sdk_s3::config::retry::RetryConfig;
 use aws_sdk_s3::config::timeout::TimeoutConfig;
 use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::Client;
 use eth2::types::Hash256;
 use eyre::Result;
 use tracing::info;
 use tracing::log::trace;
+
 use storage::BackfillProcesses;
-use crate::{BlobData, LockFile, storage, StorageReader, StorageWriter};
+
 use crate::storage::BACKFILL_LOCK;
+use crate::{storage, BlobData, LockFile, StorageReader, StorageWriter};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Config {
@@ -34,7 +36,12 @@ impl S3Storage {
     pub async fn new(config: Config) -> Result<Self> {
         let env_config = aws_config::from_env().load().await;
         let sdk_config = aws_sdk_s3::config::Builder::from(&env_config)
-            .timeout_config(TimeoutConfig::builder().connect_timeout(Duration::from_secs(15)).operation_timeout(Duration::from_secs(30)).build())
+            .timeout_config(
+                TimeoutConfig::builder()
+                    .connect_timeout(Duration::from_secs(15))
+                    .operation_timeout(Duration::from_secs(30))
+                    .build(),
+            )
             .retry_config(RetryConfig::standard())
             .endpoint_url(config.endpoint.as_str())
             .force_path_style(true)
@@ -54,7 +61,13 @@ impl S3Storage {
 impl StorageReader for S3Storage {
     async fn read_blob_data(&self, hash: Hash256) -> Result<BlobData> {
         let blob_path = Path::new(&self.path).join(format!("{:x}", hash));
-        let blob_res = self.client.get_object().bucket(self.bucket.as_str()).key(blob_path.to_str().ok_or(eyre::eyre!("Invalid blob path"))?).send().await?;
+        let blob_res = self
+            .client
+            .get_object()
+            .bucket(self.bucket.as_str())
+            .key(blob_path.to_str().ok_or(eyre::eyre!("Invalid blob path"))?)
+            .send()
+            .await?;
 
         let blob_data_bytes = blob_res.body.collect().await?.to_vec();
 
@@ -71,7 +84,13 @@ impl StorageReader for S3Storage {
     async fn exists(&self, _hash: Hash256) -> bool {
         let blob_path = Path::new(&self.path).join(format!("{:x}", _hash));
         if let Some(path) = blob_path.to_str() {
-            self.client.head_object().bucket(self.bucket.as_str()).key(path).send().await.is_ok()
+            self.client
+                .head_object()
+                .bucket(self.bucket.as_str())
+                .key(path)
+                .send()
+                .await
+                .is_ok()
         } else {
             false
         }
@@ -79,7 +98,17 @@ impl StorageReader for S3Storage {
 
     async fn read_lock_file(&self) -> Result<LockFile> {
         let lock_file_path = Path::new(&self.path).join("lockfile");
-        let lock_file_res = self.client.get_object().bucket(self.bucket.as_str()).key(lock_file_path.to_str().ok_or(eyre::eyre!("Invalid lock file path"))?).send().await?;
+        let lock_file_res = self
+            .client
+            .get_object()
+            .bucket(self.bucket.as_str())
+            .key(
+                lock_file_path
+                    .to_str()
+                    .ok_or(eyre::eyre!("Invalid lock file path"))?,
+            )
+            .send()
+            .await?;
 
         let lock_file_bytes = lock_file_res.body.collect().await?.to_vec();
         let lock_file: LockFile = serde_json::from_slice(lock_file_bytes.as_slice())?;
@@ -90,10 +119,21 @@ impl StorageReader for S3Storage {
     async fn read_backfill_processes(&self) -> Result<BackfillProcesses> {
         BACKFILL_LOCK.lock();
         let backfill_process_path = Path::new(&self.path).join("backfill_processes");
-        let backfill_process_res = self.client.get_object().bucket(self.bucket.as_str()).key(backfill_process_path.to_str().ok_or(eyre::eyre!("Invalid backfill processes path"))?).send().await?;
+        let backfill_process_res = self
+            .client
+            .get_object()
+            .bucket(self.bucket.as_str())
+            .key(
+                backfill_process_path
+                    .to_str()
+                    .ok_or(eyre::eyre!("Invalid backfill processes path"))?,
+            )
+            .send()
+            .await?;
 
         let backfill_process_bytes = backfill_process_res.body.collect().await?.to_vec();
-        let backfill_processes: BackfillProcesses = serde_json::from_slice(backfill_process_bytes.as_slice())?;
+        let backfill_processes: BackfillProcesses =
+            serde_json::from_slice(backfill_process_bytes.as_slice())?;
 
         Ok(backfill_processes)
     }
@@ -102,16 +142,20 @@ impl StorageReader for S3Storage {
 #[async_trait]
 impl StorageWriter for S3Storage {
     async fn write_blob_data(&self, blob_data: BlobData) -> Result<()> {
-        let blob_path = Path::new(&self.path).join(format!("{:x}", blob_data.header.beacon_block_hash));
+        let blob_path =
+            Path::new(&self.path).join(format!("{:x}", blob_data.header.beacon_block_hash));
         let blob_data_bytes = if self.compression {
-            let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
             serde_json::to_writer(&mut encoder, &blob_data)?;
             encoder.finish()?
         } else {
             serde_json::to_vec(&blob_data)?
         };
 
-        let mut put_object_request = self.client.put_object()
+        let mut put_object_request = self
+            .client
+            .put_object()
             .bucket(self.bucket.as_str())
             .key(blob_path.to_str().ok_or(eyre::eyre!("Invalid blob path"))?)
             .content_type("application/json")
@@ -130,12 +174,19 @@ impl StorageWriter for S3Storage {
         let lock_file_bytes = serde_json::to_vec(&lock_file)?;
         let lock_file_path = Path::new(&self.path).join("lockfile");
 
-        let _ = self.client.put_object()
+        let _ = self
+            .client
+            .put_object()
             .bucket(self.bucket.as_str())
-            .key(lock_file_path.to_str().ok_or(eyre::eyre!("Invalid lock file path"))?)
+            .key(
+                lock_file_path
+                    .to_str()
+                    .ok_or(eyre::eyre!("Invalid lock file path"))?,
+            )
             .content_type("application/json")
             .body(ByteStream::from(lock_file_bytes))
-            .send().await?;
+            .send()
+            .await?;
 
         trace!("Wrote lock file to S3: {:?}", lock_file_path);
         Ok(())
@@ -146,14 +197,24 @@ impl StorageWriter for S3Storage {
         let backfill_process_bytes = serde_json::to_vec(&backfill_processes)?;
         let backfill_process_path = Path::new(&self.path).join("backfill_processes");
 
-        let _ = self.client.put_object()
+        let _ = self
+            .client
+            .put_object()
             .bucket(self.bucket.as_str())
-            .key(backfill_process_path.to_str().ok_or(eyre::eyre!("Invalid backfill processes path"))?)
+            .key(
+                backfill_process_path
+                    .to_str()
+                    .ok_or(eyre::eyre!("Invalid backfill processes path"))?,
+            )
             .content_type("application/json")
             .body(ByteStream::from(backfill_process_bytes))
-            .send().await?;
+            .send()
+            .await?;
 
-        info!("Wrote backfill processes to S3: {:?}", backfill_process_path);
+        info!(
+            "Wrote backfill processes to S3: {:?}",
+            backfill_process_path
+        );
         Ok(())
     }
 }
@@ -162,15 +223,192 @@ impl StorageWriter for S3Storage {
 mod tests {
     use std::env;
 
-    use eth2::types::{BlobSidecarList, Hash256};
+    use crate::s3::{Config, S3Storage};
+    use crate::storage::create_test_blob_data;
+    use crate::{storage, StorageReader, StorageWriter};
+    use aws_sdk_s3::types::error::NoSuchKey;
+    use storage::{create_test_lock_file, create_test_test_backfill_processes};
     use testcontainers_modules::localstack::LocalStack;
-    use testcontainers_modules::testcontainers::ImageExt;
     use testcontainers_modules::testcontainers::runners::AsyncRunner;
-
-    use crate::{StorageReader, StorageWriter};
+    use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt};
 
     #[tokio::test]
     async fn test_write_read_blob_data() {
+        let (storage, _container) = setup(false).await;
+        storage
+            .client
+            .create_bucket()
+            .bucket("test-bucket")
+            .send()
+            .await
+            .unwrap();
+
+        let blob_data = create_test_blob_data();
+        let hash = blob_data.header.beacon_block_hash;
+        assert!(storage
+            .read_blob_data(hash)
+            .await
+            .is_err_and(|e| e.root_cause().downcast_ref::<NoSuchKey>().is_some()));
+        storage.write_blob_data(blob_data).await.unwrap();
+
+        let actual_blob_data = storage.read_blob_data(hash).await.unwrap();
+        assert_eq!(actual_blob_data.header.beacon_block_hash, hash);
+        assert_eq!(actual_blob_data.blob_sidecars.data.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_write_read_lock_file() {
+        let (storage, _container) = setup(false).await;
+        storage
+            .client
+            .create_bucket()
+            .bucket("test-bucket")
+            .send()
+            .await
+            .unwrap();
+
+        let lock_file = create_test_lock_file();
+        assert!(storage
+            .read_lock_file()
+            .await
+            .is_err_and(|e| e.root_cause().downcast_ref::<NoSuchKey>().is_some()));
+        storage.write_lock_file(lock_file.clone()).await.unwrap();
+
+        let actual_lock_file = storage.read_lock_file().await.unwrap();
+        assert_eq!(actual_lock_file.archiver_id, lock_file.archiver_id);
+        assert_eq!(actual_lock_file.timestamp, lock_file.timestamp);
+    }
+
+    #[tokio::test]
+    async fn test_write_read_backfill_processes() {
+        let (storage, _container) = setup(false).await;
+        storage
+            .client
+            .create_bucket()
+            .bucket("test-bucket")
+            .send()
+            .await
+            .unwrap();
+
+        let backfill_processes = create_test_test_backfill_processes();
+        assert!(storage
+            .read_backfill_processes()
+            .await
+            .is_err_and(|e| e.root_cause().downcast_ref::<NoSuchKey>().is_some()));
+        storage
+            .write_backfill_process(backfill_processes.clone())
+            .await
+            .unwrap();
+
+        let actual_backfill_processes = storage.read_backfill_processes().await.unwrap();
+        assert_eq!(actual_backfill_processes.len(), 1);
+        assert_eq!(
+            actual_backfill_processes
+                .values()
+                .next()
+                .unwrap()
+                .start_block,
+            backfill_processes.values().next().unwrap().start_block
+        );
+        assert_eq!(
+            actual_backfill_processes
+                .values()
+                .next()
+                .unwrap()
+                .current_block,
+            backfill_processes.values().next().unwrap().current_block
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_read_blob_data_compressed() {
+        let (storage, _container) = setup(true).await;
+        storage
+            .client
+            .create_bucket()
+            .bucket("test-bucket")
+            .send()
+            .await
+            .unwrap();
+
+        let blob_data = create_test_blob_data();
+        let hash = blob_data.header.beacon_block_hash;
+        assert!(storage
+            .read_blob_data(hash)
+            .await
+            .is_err_and(|e| e.root_cause().downcast_ref::<NoSuchKey>().is_some()));
+        storage.write_blob_data(blob_data).await.unwrap();
+
+        let actual_blob_data = storage.read_blob_data(hash).await.unwrap();
+        assert_eq!(actual_blob_data.header.beacon_block_hash, hash);
+        assert_eq!(actual_blob_data.blob_sidecars.data.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_write_read_lock_file_compressed() {
+        let (storage, _container) = setup(true).await;
+        storage
+            .client
+            .create_bucket()
+            .bucket("test-bucket")
+            .send()
+            .await
+            .unwrap();
+
+        let lock_file = create_test_lock_file();
+        assert!(storage
+            .read_lock_file()
+            .await
+            .is_err_and(|e| e.root_cause().downcast_ref::<NoSuchKey>().is_some()));
+        storage.write_lock_file(lock_file.clone()).await.unwrap();
+
+        let actual_lock_file = storage.read_lock_file().await.unwrap();
+        assert_eq!(actual_lock_file.archiver_id, lock_file.archiver_id);
+        assert_eq!(actual_lock_file.timestamp, lock_file.timestamp);
+    }
+
+    #[tokio::test]
+    async fn test_write_read_backfill_processes_compressed() {
+        let (storage, _container) = setup(true).await;
+        storage
+            .client
+            .create_bucket()
+            .bucket("test-bucket")
+            .send()
+            .await
+            .unwrap();
+
+        let backfill_processes = create_test_test_backfill_processes();
+        assert!(storage
+            .read_backfill_processes()
+            .await
+            .is_err_and(|e| e.root_cause().downcast_ref::<NoSuchKey>().is_some()));
+        storage
+            .write_backfill_process(backfill_processes.clone())
+            .await
+            .unwrap();
+
+        let actual_backfill_processes = storage.read_backfill_processes().await.unwrap();
+        assert_eq!(actual_backfill_processes.len(), 1);
+        assert_eq!(
+            actual_backfill_processes
+                .values()
+                .next()
+                .unwrap()
+                .start_block,
+            backfill_processes.values().next().unwrap().start_block
+        );
+        assert_eq!(
+            actual_backfill_processes
+                .values()
+                .next()
+                .unwrap()
+                .current_block,
+            backfill_processes.values().next().unwrap().current_block
+        );
+    }
+
+    async fn setup(compression: bool) -> (S3Storage, ContainerAsync<LocalStack>) {
         let request = LocalStack::default().with_env_var("SERVICES", "s3");
         let container = request.start().await.unwrap();
 
@@ -181,52 +419,14 @@ mod tests {
         env::set_var("AWS_SECRET_ACCESS_KEY", "test");
         env::set_var("AWS_REGION", "us-east-1");
 
-        let mut config = crate::s3::Config {
+        let config = Config {
             endpoint: format!("http://{}:{}", host_ip, host_port),
             bucket: "test-bucket".to_string(),
             path: "blobs".to_string(),
-            compression: false,
+            compression,
         };
 
-        let storage = crate::s3::S3Storage::new(config.clone()).await.unwrap();
-        storage.client.create_bucket().bucket("test-bucket").send().await.unwrap();
-
-        let header_hash = Hash256::random();
-        let blob_data = crate::BlobData::new(
-            crate::Header {
-                beacon_block_hash: header_hash,
-            },
-            crate::BlobSidecars {
-                data: BlobSidecarList::default(),
-            },
-        );
-
-        storage.write_blob_data(blob_data).await.unwrap();
-
-        let actual_blob_data = storage.read_blob_data(header_hash).await.unwrap();
-        assert_eq!(actual_blob_data.header.beacon_block_hash, header_hash);
-        assert_eq!(actual_blob_data.blob_sidecars.data.len(), 0);
-
-        config.compression = true;
-        let storage = crate::s3::S3Storage::new(config.clone()).await.unwrap();
-
-        let header_hash = Hash256::random();
-        let blob_data = crate::BlobData::new(
-            crate::Header {
-                beacon_block_hash: header_hash,
-            },
-            crate::BlobSidecars {
-                data: BlobSidecarList::default(),
-            },
-        );
-
-        storage.write_blob_data(blob_data).await.unwrap();
-        let actual_blob_data = storage.read_blob_data(header_hash).await.unwrap();
-        assert_eq!(actual_blob_data.header.beacon_block_hash, header_hash);
-        assert_eq!(actual_blob_data.blob_sidecars.data.len(), 0);
+        let storage = S3Storage::new(config).await.unwrap();
+        (storage, container)
     }
 }
-
-
-
-

@@ -6,8 +6,8 @@ use eyre::Result;
 use serde::{Deserialize, Serialize};
 use spin::Mutex;
 
-pub(crate) type BackfillProcesses = HashMap<Hash256, BackfillProcess>;
-pub(crate) static BACKFILL_LOCK: Mutex<()> = Mutex::new(());
+pub type BackfillProcesses = HashMap<Hash256, BackfillProcess>;
+pub static BACKFILL_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct BackfillProcess {
@@ -40,7 +40,7 @@ impl BlobData {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Default, Serialize, Deserialize)]
 pub struct LockFile {
     pub archiver_id: String,
     pub timestamp: u64,
@@ -68,3 +68,47 @@ pub trait StorageWriter {
 
 #[async_trait]
 pub trait Storage: StorageReader + StorageWriter {}
+
+pub fn create_test_lock_file() -> LockFile {
+    LockFile {
+        archiver_id: "test_archiver".to_string(),
+        timestamp: 0,
+    }
+}
+
+pub fn create_test_test_backfill_processes() -> BackfillProcesses {
+    let mut backfill_processes: BackfillProcesses = HashMap::new();
+    let header_hash = Hash256::random();
+    let backfill_process = BackfillProcess {
+        start_block: create_test_block_header(),
+        current_block: create_test_block_header(),
+    };
+    backfill_processes.insert(header_hash, backfill_process);
+    backfill_processes
+}
+
+pub fn create_test_blob_data() -> BlobData {
+    BlobData::new(create_test_header(), create_test_blob_sidecars())
+}
+
+fn create_test_header() -> Header {
+    Header {
+        beacon_block_hash: Hash256::random(),
+    }
+}
+
+fn create_test_blob_sidecars() -> BlobSidecars {
+    BlobSidecars {
+        data: BlobSidecarList::default(),
+    }
+}
+
+fn create_test_block_header() -> BeaconBlockHeader {
+    BeaconBlockHeader {
+        slot: Default::default(),
+        proposer_index: 0,
+        parent_root: Default::default(),
+        state_root: Default::default(),
+        body_root: Default::default(),
+    }
+}

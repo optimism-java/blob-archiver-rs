@@ -1,7 +1,8 @@
 extern crate core;
 
-pub mod storage;
+mod fs;
 mod s3;
+pub mod storage;
 
 pub use storage::*;
 
