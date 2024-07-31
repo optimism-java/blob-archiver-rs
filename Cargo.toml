@@ -28,3 +28,4 @@ spin = { version = "0.9.8", features = ["mutex"] }
 aws-config = { version = "1.5.4", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1.41.0"
 tokio = { version = "1.38.1", features = ["full"] }
+again = "0.1.2"

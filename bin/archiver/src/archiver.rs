@@ -1,5 +1,4 @@
-#![allow(incomplete_features)]
-
+use again::RetryPolicy;
 use blob_archiver_storage::{
     BackfillProcess, BackfillProcesses, BlobData, BlobSidecars, Header, LockFile, Storage,
 };
@@ -12,10 +11,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch::Receiver;
 use tokio::time::{interval, sleep};
-use tracing::log::{error, info, trace};
+use tracing::log::{debug, error, info, trace};
 
 #[allow(dead_code)]
-const LIVE_FETCH_BLOB_MAXIMUM_RETRIES: i32 = 10;
+const LIVE_FETCH_BLOB_MAXIMUM_RETRIES: usize = 10;
 #[allow(dead_code)]
 const STARTUP_FETCH_BLOB_MAXIMUM_RETRIES: i32 = 3;
 #[allow(dead_code)]
@@ -310,16 +309,67 @@ impl Archiver {
             .await;
     }
 
-    // async fn process_blocks_until_known_block() {
-    //     debug!("refreshing live data");
-    //     let mut start: &BlockHeaderData;
-    //     let mut current_block_id = "head";
-    //
-    //     loop {
-    //
-    //     }
-    //
-    // }
+    #[allow(dead_code)]
+    async fn process_blocks_until_known_block(&self) {
+        debug!("refreshing live data");
+        let mut start: Option<BlockHeaderData> = None;
+        let mut current_block_id = BlockId::Head;
+
+        loop {
+            let retry_policy = RetryPolicy::exponential(Duration::from_secs(1))
+                .with_jitter(true)
+                .with_max_delay(Duration::from_secs(10))
+                .with_max_retries(LIVE_FETCH_BLOB_MAXIMUM_RETRIES);
+            let res = retry_policy
+                .retry(|| self.persist_blobs_for_block(current_block_id, false))
+                .await;
+
+            if let Err(e) = res {
+                error!("Error fetching blobs for block: {:#?}", e);
+                return;
+            }
+
+            let (curr, already_exists) = res.unwrap();
+            if start.is_none() {
+                start = Some(curr.clone());
+            }
+
+            if !already_exists {
+                // todo: metrics
+            } else {
+                debug!("blob already exists, hash: {:#?}", curr.clone().root);
+                break;
+            }
+
+            current_block_id = BlockId::Root(curr.clone().header.message.parent_root)
+        }
+
+        info!(
+            "live data refreshed,startHash: {:#?},endHash: {:#?}",
+            start.unwrap().root,
+            current_block_id
+        );
+    }
+
+    #[allow(dead_code)]
+    async fn track_latest_block(&self) {
+        let mut ticket = interval(self.config.poll_interval);
+        let mut shutdown_rx = self.shutdown_rx.clone();
+        loop {
+            tokio::select! {
+                    _ = ticket.tick() => {
+                        self.process_blocks_until_known_block().await;
+                    }
+
+                    _ = shutdown_rx.changed() => {
+                        return;
+                }
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    async fn start(&self) {}
 }
 
 #[cfg(test)]
@@ -338,7 +388,7 @@ mod tests {
             SensitiveUrl::from_str("https://ethereum-beacon-api.publicnode.com").unwrap(),
             Timeouts::set_all(Duration::from_secs(30)),
         );
-        let dir = &PathBuf::from("test_dir");
+        let dir = &PathBuf::from("test_persist_blobs_for_block");
         let storage = FSStorage::new(dir.clone()).await.unwrap();
         tokio::fs::create_dir_all(dir).await.unwrap();
         let (_, rx) = tokio::sync::watch::channel(false);

@@ -96,7 +96,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_fs_storage() {
-        let storage = FSStorage::new(PathBuf::from("test_dir")).await.unwrap();
+        let storage = FSStorage::new(PathBuf::from("test_fs_storage"))
+            .await
+            .unwrap();
         tokio::fs::create_dir_all(&storage.dir).await.unwrap();
         let blob_data = create_test_blob_data();
         assert!(storage
@@ -136,7 +138,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_fs_storage_exists() {
-        let storage = FSStorage::new(PathBuf::from("test_dir")).await.unwrap();
+        let storage = FSStorage::new(PathBuf::from("test_fs_storage_exists"))
+            .await
+            .unwrap();
         tokio::fs::create_dir_all(&storage.dir).await.unwrap();
         let blob_data = create_test_blob_data();
         assert!(!storage.exists(&blob_data.header.beacon_block_hash).await);
