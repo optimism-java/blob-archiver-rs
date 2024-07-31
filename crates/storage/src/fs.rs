@@ -6,10 +6,10 @@ use eyre::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::storage::{BackfillProcesses, BACKFILL_LOCK};
-use crate::{BlobData, LockFile, StorageReader, StorageWriter};
+use crate::{BlobData, LockFile, Storage, StorageReader, StorageWriter};
 
 pub struct FSStorage {
-    pub(crate) dir: PathBuf,
+    pub dir: PathBuf,
 }
 
 impl FSStorage {
@@ -19,8 +19,11 @@ impl FSStorage {
 }
 
 #[async_trait]
+impl Storage for FSStorage {}
+
+#[async_trait]
 impl StorageReader for FSStorage {
-    async fn read_blob_data(&self, hash: Hash256) -> Result<BlobData> {
+    async fn read_blob_data(&self, hash: &Hash256) -> Result<BlobData> {
         let path = self.dir.join(format!("{:x}", hash));
         let mut file = tokio::fs::File::open(path).await?;
         let mut data = Vec::new();
@@ -28,7 +31,7 @@ impl StorageReader for FSStorage {
         Ok(serde_json::from_slice(&data)?)
     }
 
-    async fn exists(&self, hash: Hash256) -> bool {
+    async fn exists(&self, hash: &Hash256) -> bool {
         self.dir.join(format!("{:x}", hash)).exists()
     }
 
@@ -52,30 +55,30 @@ impl StorageReader for FSStorage {
 
 #[async_trait]
 impl StorageWriter for FSStorage {
-    async fn write_blob_data(&self, blob_data: BlobData) -> Result<()> {
+    async fn write_blob_data(&self, blob_data: &BlobData) -> Result<()> {
         let path = self
             .dir
             .join(format!("{:x}", blob_data.header.beacon_block_hash));
         tokio::fs::create_dir_all(path.parent().unwrap()).await?;
         let mut file = tokio::fs::File::create(path).await?;
-        file.write_all(&serde_json::to_vec(&blob_data)?).await?;
+        file.write_all(&serde_json::to_vec(blob_data)?).await?;
         Ok(())
     }
 
-    async fn write_lock_file(&self, lock_file: LockFile) -> Result<()> {
+    async fn write_lock_file(&self, lock_file: &LockFile) -> Result<()> {
         let path = self.dir.join("lockfile");
         tokio::fs::create_dir_all(path.parent().unwrap()).await?;
         let mut file = tokio::fs::File::create(path).await?;
-        file.write_all(&serde_json::to_vec(&lock_file)?).await?;
+        file.write_all(&serde_json::to_vec(lock_file)?).await?;
         Ok(())
     }
 
-    async fn write_backfill_process(&self, backfill_process: BackfillProcesses) -> Result<()> {
+    async fn write_backfill_processes(&self, backfill_process: &BackfillProcesses) -> Result<()> {
         BACKFILL_LOCK.lock();
         let path = self.dir.join("backfill_processes");
         tokio::fs::create_dir_all(path.parent().unwrap()).await?;
         let mut file = tokio::fs::File::create(path).await?;
-        file.write_all(&serde_json::to_vec(&backfill_process)?)
+        file.write_all(&serde_json::to_vec(backfill_process)?)
             .await?;
         Ok(())
     }
@@ -83,10 +86,11 @@ impl StorageWriter for FSStorage {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io;
+
     use crate::storage::{
         create_test_blob_data, create_test_lock_file, create_test_test_backfill_processes,
     };
-    use tokio::io;
 
     use super::*;
 
@@ -96,13 +100,13 @@ mod tests {
         tokio::fs::create_dir_all(&storage.dir).await.unwrap();
         let blob_data = create_test_blob_data();
         assert!(storage
-            .read_blob_data(blob_data.header.beacon_block_hash)
+            .read_blob_data(&blob_data.header.beacon_block_hash)
             .await
             .is_err_and(|e| e.downcast_ref::<io::Error>().is_some()));
-        storage.write_blob_data(blob_data.clone()).await.unwrap();
+        storage.write_blob_data(&blob_data).await.unwrap();
         assert_eq!(
             storage
-                .read_blob_data(blob_data.header.beacon_block_hash)
+                .read_blob_data(&blob_data.header.beacon_block_hash)
                 .await
                 .unwrap(),
             blob_data
@@ -112,7 +116,7 @@ mod tests {
             .read_lock_file()
             .await
             .is_err_and(|e| e.downcast_ref::<io::Error>().is_some()));
-        storage.write_lock_file(lock_file.clone()).await.unwrap();
+        storage.write_lock_file(&lock_file).await.unwrap();
         assert_eq!(storage.read_lock_file().await.unwrap(), lock_file);
         let test_backfill_processes = create_test_test_backfill_processes();
         assert!(storage
@@ -120,7 +124,7 @@ mod tests {
             .await
             .is_err_and(|e| e.downcast_ref::<io::Error>().is_some()));
         storage
-            .write_backfill_process(test_backfill_processes.clone())
+            .write_backfill_processes(&test_backfill_processes)
             .await
             .unwrap();
         assert_eq!(
@@ -135,9 +139,9 @@ mod tests {
         let storage = FSStorage::new(PathBuf::from("test_dir")).await.unwrap();
         tokio::fs::create_dir_all(&storage.dir).await.unwrap();
         let blob_data = create_test_blob_data();
-        assert!(!storage.exists(blob_data.header.beacon_block_hash).await);
-        storage.write_blob_data(blob_data.clone()).await.unwrap();
-        assert!(storage.exists(blob_data.header.beacon_block_hash).await);
+        assert!(!storage.exists(&blob_data.header.beacon_block_hash).await);
+        storage.write_blob_data(&blob_data).await.unwrap();
+        assert!(storage.exists(&blob_data.header.beacon_block_hash).await);
         clean_dir(&storage.dir);
     }
 

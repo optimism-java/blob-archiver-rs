@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use eth2::types::{BeaconBlockHeader, BlobSidecarList, Hash256, MainnetEthSpec};
+use eth2::types::{
+    BeaconBlockHeader, BlobSidecarList, BlockHeaderAndSignature, BlockHeaderData, Hash256,
+    MainnetEthSpec, SignatureBytes,
+};
 use eyre::Result;
 use serde::{Deserialize, Serialize};
 use spin::Mutex;
@@ -9,10 +12,10 @@ use spin::Mutex;
 pub type BackfillProcesses = HashMap<Hash256, BackfillProcess>;
 pub static BACKFILL_LOCK: Mutex<()> = Mutex::new(());
 
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct BackfillProcess {
-    pub start_block: BeaconBlockHeader,
-    pub current_block: BeaconBlockHeader,
+    pub start_block: BlockHeaderData,
+    pub current_block: BlockHeaderData,
 }
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone, Serialize, Deserialize)]
@@ -48,9 +51,9 @@ pub struct LockFile {
 
 #[async_trait]
 pub trait StorageReader {
-    async fn read_blob_data(&self, hash: Hash256) -> Result<BlobData>;
+    async fn read_blob_data(&self, hash: &Hash256) -> Result<BlobData>;
 
-    async fn exists(&self, hash: Hash256) -> bool;
+    async fn exists(&self, hash: &Hash256) -> bool;
 
     async fn read_lock_file(&self) -> Result<LockFile>;
 
@@ -59,15 +62,15 @@ pub trait StorageReader {
 
 #[async_trait]
 pub trait StorageWriter {
-    async fn write_blob_data(&self, blob_data: BlobData) -> Result<()>;
+    async fn write_blob_data(&self, blob_data: &BlobData) -> Result<()>;
 
-    async fn write_lock_file(&self, lock_file: LockFile) -> Result<()>;
+    async fn write_lock_file(&self, lock_file: &LockFile) -> Result<()>;
 
-    async fn write_backfill_process(&self, backfill_process: BackfillProcesses) -> Result<()>;
+    async fn write_backfill_processes(&self, backfill_process: &BackfillProcesses) -> Result<()>;
 }
 
 #[async_trait]
-pub trait Storage: StorageReader + StorageWriter {}
+pub trait Storage: StorageReader + StorageWriter + Send + Sync {}
 
 pub fn create_test_lock_file() -> LockFile {
     LockFile {
@@ -103,12 +106,13 @@ fn create_test_blob_sidecars() -> BlobSidecars {
     }
 }
 
-fn create_test_block_header() -> BeaconBlockHeader {
-    BeaconBlockHeader {
-        slot: Default::default(),
-        proposer_index: 0,
-        parent_root: Default::default(),
-        state_root: Default::default(),
-        body_root: Default::default(),
+fn create_test_block_header() -> BlockHeaderData {
+    BlockHeaderData {
+        root: Default::default(),
+        canonical: false,
+        header: BlockHeaderAndSignature {
+            message: BeaconBlockHeader::empty(),
+            signature: SignatureBytes::empty(),
+        },
     }
 }

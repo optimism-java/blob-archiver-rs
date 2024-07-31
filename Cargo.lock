@@ -246,6 +246,7 @@ dependencies = [
  "blob-archiver-storage",
  "clap",
  "eth2",
+ "eyre",
  "futures-util",
  "reqwest 0.12.5",
  "serde",

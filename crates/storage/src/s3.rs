@@ -59,7 +59,7 @@ impl S3Storage {
 
 #[async_trait]
 impl StorageReader for S3Storage {
-    async fn read_blob_data(&self, hash: Hash256) -> Result<BlobData> {
+    async fn read_blob_data(&self, hash: &Hash256) -> Result<BlobData> {
         let blob_path = Path::new(&self.path).join(format!("{:x}", hash));
         let blob_res = self
             .client
@@ -81,8 +81,8 @@ impl StorageReader for S3Storage {
         Ok(blob_data)
     }
 
-    async fn exists(&self, _hash: Hash256) -> bool {
-        let blob_path = Path::new(&self.path).join(format!("{:x}", _hash));
+    async fn exists(&self, hash: &Hash256) -> bool {
+        let blob_path = Path::new(&self.path).join(format!("{:x}", hash));
         if let Some(path) = blob_path.to_str() {
             self.client
                 .head_object()
@@ -141,16 +141,16 @@ impl StorageReader for S3Storage {
 
 #[async_trait]
 impl StorageWriter for S3Storage {
-    async fn write_blob_data(&self, blob_data: BlobData) -> Result<()> {
+    async fn write_blob_data(&self, blob_data: &BlobData) -> Result<()> {
         let blob_path =
             Path::new(&self.path).join(format!("{:x}", blob_data.header.beacon_block_hash));
         let blob_data_bytes = if self.compression {
             let mut encoder =
                 flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-            serde_json::to_writer(&mut encoder, &blob_data)?;
+            serde_json::to_writer(&mut encoder, blob_data)?;
             encoder.finish()?
         } else {
-            serde_json::to_vec(&blob_data)?
+            serde_json::to_vec(blob_data)?
         };
 
         let mut put_object_request = self
@@ -170,8 +170,8 @@ impl StorageWriter for S3Storage {
         Ok(())
     }
 
-    async fn write_lock_file(&self, lock_file: LockFile) -> Result<()> {
-        let lock_file_bytes = serde_json::to_vec(&lock_file)?;
+    async fn write_lock_file(&self, lock_file: &LockFile) -> Result<()> {
+        let lock_file_bytes = serde_json::to_vec(lock_file)?;
         let lock_file_path = Path::new(&self.path).join("lockfile");
 
         let _ = self
@@ -192,9 +192,9 @@ impl StorageWriter for S3Storage {
         Ok(())
     }
 
-    async fn write_backfill_process(&self, backfill_processes: BackfillProcesses) -> Result<()> {
+    async fn write_backfill_processes(&self, backfill_processes: &BackfillProcesses) -> Result<()> {
         BACKFILL_LOCK.lock();
-        let backfill_process_bytes = serde_json::to_vec(&backfill_processes)?;
+        let backfill_process_bytes = serde_json::to_vec(backfill_processes)?;
         let backfill_process_path = Path::new(&self.path).join("backfill_processes");
 
         let _ = self
@@ -246,12 +246,12 @@ mod tests {
         let blob_data = create_test_blob_data();
         let hash = blob_data.header.beacon_block_hash;
         assert!(storage
-            .read_blob_data(hash)
+            .read_blob_data(&hash)
             .await
             .is_err_and(|e| e.root_cause().downcast_ref::<NoSuchKey>().is_some()));
-        storage.write_blob_data(blob_data).await.unwrap();
+        storage.write_blob_data(&blob_data).await.unwrap();
 
-        let actual_blob_data = storage.read_blob_data(hash).await.unwrap();
+        let actual_blob_data = storage.read_blob_data(&hash).await.unwrap();
         assert_eq!(actual_blob_data.header.beacon_block_hash, hash);
         assert_eq!(actual_blob_data.blob_sidecars.data.len(), 0);
     }
@@ -272,7 +272,7 @@ mod tests {
             .read_lock_file()
             .await
             .is_err_and(|e| e.root_cause().downcast_ref::<NoSuchKey>().is_some()));
-        storage.write_lock_file(lock_file.clone()).await.unwrap();
+        storage.write_lock_file(&lock_file).await.unwrap();
 
         let actual_lock_file = storage.read_lock_file().await.unwrap();
         assert_eq!(actual_lock_file.archiver_id, lock_file.archiver_id);
@@ -296,7 +296,7 @@ mod tests {
             .await
             .is_err_and(|e| e.root_cause().downcast_ref::<NoSuchKey>().is_some()));
         storage
-            .write_backfill_process(backfill_processes.clone())
+            .write_backfill_processes(&backfill_processes)
             .await
             .unwrap();
 
@@ -334,12 +334,12 @@ mod tests {
         let blob_data = create_test_blob_data();
         let hash = blob_data.header.beacon_block_hash;
         assert!(storage
-            .read_blob_data(hash)
+            .read_blob_data(&hash)
             .await
             .is_err_and(|e| e.root_cause().downcast_ref::<NoSuchKey>().is_some()));
-        storage.write_blob_data(blob_data).await.unwrap();
+        storage.write_blob_data(&blob_data).await.unwrap();
 
-        let actual_blob_data = storage.read_blob_data(hash).await.unwrap();
+        let actual_blob_data = storage.read_blob_data(&hash).await.unwrap();
         assert_eq!(actual_blob_data.header.beacon_block_hash, hash);
         assert_eq!(actual_blob_data.blob_sidecars.data.len(), 0);
     }
@@ -360,7 +360,7 @@ mod tests {
             .read_lock_file()
             .await
             .is_err_and(|e| e.root_cause().downcast_ref::<NoSuchKey>().is_some()));
-        storage.write_lock_file(lock_file.clone()).await.unwrap();
+        storage.write_lock_file(&lock_file).await.unwrap();
 
         let actual_lock_file = storage.read_lock_file().await.unwrap();
         assert_eq!(actual_lock_file.archiver_id, lock_file.archiver_id);
@@ -384,7 +384,7 @@ mod tests {
             .await
             .is_err_and(|e| e.root_cause().downcast_ref::<NoSuchKey>().is_some()));
         storage
-            .write_backfill_process(backfill_processes.clone())
+            .write_backfill_processes(&backfill_processes)
             .await
             .unwrap();
 
