@@ -2,8 +2,7 @@ use again::RetryPolicy;
 use blob_archiver_storage::{
     BackfillProcess, BackfillProcesses, BlobData, BlobSidecars, Header, LockFile, Storage,
 };
-use eth2::types::{BlockHeaderData, BlockId, Hash256, MainnetEthSpec};
-use eth2::BeaconNodeHttpClient;
+use eth2::types::{BlockHeaderData, BlockId, Hash256};
 use eyre::Result;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,6 +11,7 @@ use std::time::Duration;
 use tokio::sync::watch::Receiver;
 use tokio::time::{interval, sleep};
 use tracing::log::{debug, error, info, trace};
+use blob_archiver_beacon::beacon_client::BeaconClient;
 
 #[allow(dead_code)]
 const LIVE_FETCH_BLOB_MAXIMUM_RETRIES: usize = 10;
@@ -40,7 +40,7 @@ pub struct Config {
 }
 
 pub struct Archiver {
-    pub beacon_client: BeaconNodeHttpClient,
+    pub beacon_client: Arc<dyn BeaconClient>,
 
     storage: Arc<dyn Storage>,
     #[allow(dead_code)]
@@ -53,7 +53,7 @@ pub struct Archiver {
 
 impl Archiver {
     pub fn new(
-        beacon_client: BeaconNodeHttpClient,
+        beacon_client: Arc<dyn BeaconClient>,
         storage: Arc<dyn Storage>,
         shutdown_rx: Receiver<bool>,
     ) -> Self {
@@ -88,7 +88,7 @@ impl Archiver {
 
                 let blobs_resp_opt = self
                     .beacon_client
-                    .get_blobs::<MainnetEthSpec>(BlockId::Root(header.data.root), None)
+                    .get_blobs(BlockId::Root(header.data.root), None)
                     .await
                     .map_err(|e| eyre::eyre!(e))?;
                 if let Some(blob_sidecars) = blobs_resp_opt {
@@ -228,7 +228,7 @@ impl Archiver {
                         &process.current_block,
                         &mut processes,
                     )
-                    .await;
+                        .await;
                 }
             }
             Err(e) => {
@@ -249,9 +249,15 @@ impl Archiver {
         let mut already_exists = false;
         let mut count = 0;
         let mut res: Result<(BlockHeaderData, bool)>;
+        let shutdown_rx = self.shutdown_rx.clone();
         info!("backfill process initiated, curr_hash: {:#?}, curr_slot: {:#?}, start_hash: {:#?},start_slot: {:#?}", curr.root, curr.header.message.slot.clone(), start.root, start.header.message.slot.clone());
 
         while !already_exists {
+            if *shutdown_rx.borrow() {
+                info!("Shutdown signal received, breaking backfill loop");
+                return;
+            }
+
             if curr.root == self.config.origin_block {
                 info!("reached origin block, hash: {:#?}", curr.root);
                 self.defer_fn(start, &curr, backfill_processes).await;
@@ -380,7 +386,8 @@ mod tests {
 
     use super::*;
     use blob_archiver_storage::fs::FSStorage;
-    use eth2::{SensitiveUrl, Timeouts};
+    use eth2::{BeaconNodeHttpClient, SensitiveUrl, Timeouts};
+    use blob_archiver_beacon::beacon_client::BeaconClientEth2;
 
     #[tokio::test]
     async fn test_persist_blobs_for_block() {
@@ -392,7 +399,10 @@ mod tests {
         let storage = FSStorage::new(dir.clone()).await.unwrap();
         tokio::fs::create_dir_all(dir).await.unwrap();
         let (_, rx) = tokio::sync::watch::channel(false);
-        let archiver = Archiver::new(beacon_client, Arc::new(storage), rx);
+        let beacon_client_eth2 = BeaconClientEth2 {
+            beacon_client,
+        };
+        let archiver = Archiver::new(Arc::new(beacon_client_eth2), Arc::new(storage), rx);
 
         let block_id = BlockId::Head;
         archiver

@@ -21,4 +21,5 @@ tokio.workspace = true
 eyre.workspace = true
 again.workspace = true
 blob-archiver-storage = { path = "../../crates/storage" }
+blob-archiver-beacon = { path = "../../crates/beacon" }
 

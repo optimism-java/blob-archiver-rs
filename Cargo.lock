@@ -255,6 +255,7 @@ name = "archiver"
 version = "0.1.0"
 dependencies = [
  "again",
+ "blob-archiver-beacon",
  "blob-archiver-storage",
  "clap",
  "eth2",
@@ -909,6 +910,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
 dependencies = [
  "digest 0.10.7",
+]
+
+[[package]]
+name = "blob-archiver-beacon"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "eth2",
+ "once_cell",
+ "rand 0.8.5",
 ]
 
 [[package]]
