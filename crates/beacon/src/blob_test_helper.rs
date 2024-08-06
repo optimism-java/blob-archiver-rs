@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
-use eth2::types::{Blob, BlobSidecar, BlobSidecarList, FixedVector, Hash256, KzgCommitment, KzgProof, MainnetEthSpec, SignedBeaconBlockHeader, Slot};
 use eth2::types::test_utils::TestRandom;
+use eth2::types::{
+    Blob, BlobSidecar, BlobSidecarList, FixedVector, Hash256, KzgCommitment, KzgProof,
+    MainnetEthSpec, SignedBeaconBlockHeader, Slot,
+};
 use once_cell::sync::Lazy;
 
 pub static ORIGIN_BLOCK: Lazy<Hash256> = Lazy::new(|| Hash256::from_slice(&[9, 9, 9, 9, 9]));
@@ -30,7 +33,9 @@ pub fn new_blob_sidecar(i: u64) -> BlobSidecar<MainnetEthSpec> {
 pub fn new_blob_sidecars(n: usize) -> BlobSidecarList<MainnetEthSpec> {
     let mut blob_sidecars = BlobSidecarList::default();
     for i in 0..n {
-        blob_sidecars.push(Arc::from(new_blob_sidecar(i as u64))).expect("TODO: panic message");
+        blob_sidecars
+            .push(Arc::from(new_blob_sidecar(i as u64)))
+            .expect("TODO: panic message");
     }
     blob_sidecars
 }

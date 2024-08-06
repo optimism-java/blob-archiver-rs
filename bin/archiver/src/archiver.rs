@@ -1,9 +1,12 @@
 use again::RetryPolicy;
+use blob_archiver_beacon::beacon_client::BeaconClient;
 use blob_archiver_storage::{
     BackfillProcess, BackfillProcesses, BlobData, BlobSidecars, Header, LockFile, Storage,
 };
+use eth2::types::Slot;
 use eth2::types::{BlockHeaderData, BlockId, Hash256};
-use eyre::Result;
+use eth2::Error;
+use eyre::{eyre, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -11,14 +14,13 @@ use std::time::Duration;
 use tokio::sync::watch::Receiver;
 use tokio::time::{interval, sleep};
 use tracing::log::{debug, error, info, trace};
-use blob_archiver_beacon::beacon_client::BeaconClient;
 
 #[allow(dead_code)]
 const LIVE_FETCH_BLOB_MAXIMUM_RETRIES: usize = 10;
 #[allow(dead_code)]
-const STARTUP_FETCH_BLOB_MAXIMUM_RETRIES: i32 = 3;
+const STARTUP_FETCH_BLOB_MAXIMUM_RETRIES: usize = 3;
 #[allow(dead_code)]
-const REARCHIVE_MAXIMUM_RETRIES: i32 = 3;
+const REARCHIVE_MAXIMUM_RETRIES: usize = 3;
 #[allow(dead_code)]
 const BACKFILL_ERROR_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 #[allow(dead_code)]
@@ -29,6 +31,13 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(20);
 const OBTAIN_LOCK_RETRY_INTERVAL_SECS: u64 = 10;
 #[allow(dead_code)]
 static OBTAIN_LOCK_RETRY_INTERVAL: AtomicU64 = AtomicU64::new(OBTAIN_LOCK_RETRY_INTERVAL_SECS);
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RearchiveResp {
+    pub from: u64,
+    pub to: u64,
+    pub error: Option<String>,
+}
 
 #[derive(Debug, PartialEq, Eq, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -43,9 +52,9 @@ pub struct Archiver {
     pub beacon_client: Arc<dyn BeaconClient>,
 
     storage: Arc<dyn Storage>,
-    #[allow(dead_code)]
+
     id: String,
-    #[allow(dead_code)]
+
     pub config: Config,
 
     shutdown_rx: Receiver<bool>,
@@ -70,7 +79,7 @@ impl Archiver {
         &self,
         block_id: BlockId,
         overwrite: bool,
-    ) -> Result<(BlockHeaderData, bool)> {
+    ) -> Result<Option<(BlockHeaderData, bool)>> {
         let header_resp_opt = self
             .beacon_client
             .get_beacon_headers_block_id(block_id)
@@ -78,12 +87,12 @@ impl Archiver {
             .map_err(|e| eyre::eyre!(e))?;
 
         match header_resp_opt {
-            None => Err(eyre::eyre!("No header response")),
+            None => Ok(None),
             Some(header) => {
                 let exists = self.storage.exists(&header.data.root).await;
 
                 if exists && !overwrite {
-                    return Ok((header.data, true));
+                    return Ok(Some((header.data, true)));
                 }
 
                 let blobs_resp_opt = self
@@ -103,9 +112,9 @@ impl Archiver {
                     );
                     self.storage.write_blob_data(blob_data).await?;
                     trace!("Persisting blobs for block: {:?}", blob_data);
-                    return Ok((header.data, exists));
+                    return Ok(Some((header.data, exists)));
                 }
-                Ok((header.data, exists))
+                Ok(Some((header.data, exists)))
             }
         }
     }
@@ -228,7 +237,7 @@ impl Archiver {
                         &process.current_block,
                         &mut processes,
                     )
-                        .await;
+                    .await;
                 }
             }
             Err(e) => {
@@ -248,7 +257,7 @@ impl Archiver {
         let mut curr = current.clone();
         let mut already_exists = false;
         let mut count = 0;
-        let mut res: Result<(BlockHeaderData, bool)>;
+        let mut res: Result<Option<(BlockHeaderData, bool)>>;
         let shutdown_rx = self.shutdown_rx.clone();
         info!("backfill process initiated, curr_hash: {:#?}, curr_slot: {:#?}, start_hash: {:#?},start_slot: {:#?}", curr.root, curr.header.message.slot.clone(), start.root, start.header.message.slot.clone());
 
@@ -276,7 +285,14 @@ impl Archiver {
                 continue;
             };
 
-            let (parent, parent_exists) = res.unwrap();
+            let Some((parent, parent_exists)) = res.unwrap() else {
+                error!(
+                    "failed to persist blobs for block, will retry, hash: {:#?}",
+                    curr.header.message.parent_root
+                );
+                sleep(BACKFILL_ERROR_RETRY_INTERVAL).await;
+                continue;
+            };
             curr = parent;
             already_exists = parent_exists;
 
@@ -322,7 +338,7 @@ impl Archiver {
         let mut current_block_id = BlockId::Head;
 
         loop {
-            let retry_policy = RetryPolicy::exponential(Duration::from_secs(1))
+            let retry_policy = RetryPolicy::exponential(Duration::from_millis(250))
                 .with_jitter(true)
                 .with_max_delay(Duration::from_secs(10))
                 .with_max_retries(LIVE_FETCH_BLOB_MAXIMUM_RETRIES);
@@ -335,7 +351,11 @@ impl Archiver {
                 return;
             }
 
-            let (curr, already_exists) = res.unwrap();
+            let Some((curr, already_exists)) = res.unwrap() else {
+                error!("Error fetching blobs for block");
+                return;
+            };
+
             if start.is_none() {
                 start = Some(curr.clone());
             }
@@ -376,6 +396,52 @@ impl Archiver {
 
     #[allow(dead_code)]
     async fn start(&self) {}
+
+    #[allow(dead_code)]
+    async fn rearchive_range(&self, from: u64, to: u64) -> RearchiveResp {
+        for i in from..=to {
+            info!("rearchiving block: {}", i);
+            let retry_policy = RetryPolicy::exponential(Duration::from_millis(250))
+                .with_jitter(true)
+                .with_max_delay(Duration::from_secs(10))
+                .with_max_retries(REARCHIVE_MAXIMUM_RETRIES);
+            let r = retry_policy.retry(|| self.rearchive(i)).await;
+
+            match r {
+                Err(e) => {
+                    error!("Error fetching blobs for block: {:#?}", e);
+                    return RearchiveResp {
+                        from,
+                        to,
+                        error: Some(e.downcast::<Error>().unwrap().to_string()),
+                    };
+                }
+                Ok(false) => {
+                    info!("block not found, skipping");
+                }
+                Ok(true) => {
+                    info!("block rearchived successfully")
+                }
+            }
+        }
+        RearchiveResp {
+            from,
+            to,
+            error: None,
+        }
+    }
+
+    async fn rearchive(&self, i: u64) -> Result<bool> {
+        let res = self
+            .persist_blobs_for_block(BlockId::Slot(Slot::new(i)), true)
+            .await;
+
+        match res {
+            Err(e) => Err(eyre!(e)),
+            Ok(None) => Ok(false),
+            Ok(Some(_)) => Ok(true),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -385,9 +451,9 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use blob_archiver_beacon::beacon_client::BeaconClientEth2;
     use blob_archiver_storage::fs::FSStorage;
     use eth2::{BeaconNodeHttpClient, SensitiveUrl, Timeouts};
-    use blob_archiver_beacon::beacon_client::BeaconClientEth2;
 
     #[tokio::test]
     async fn test_persist_blobs_for_block() {
@@ -399,9 +465,7 @@ mod tests {
         let storage = FSStorage::new(dir.clone()).await.unwrap();
         tokio::fs::create_dir_all(dir).await.unwrap();
         let (_, rx) = tokio::sync::watch::channel(false);
-        let beacon_client_eth2 = BeaconClientEth2 {
-            beacon_client,
-        };
+        let beacon_client_eth2 = BeaconClientEth2 { beacon_client };
         let archiver = Archiver::new(Arc::new(beacon_client_eth2), Arc::new(storage), rx);
 
         let block_id = BlockId::Head;
