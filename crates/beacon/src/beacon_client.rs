@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use async_trait::async_trait;
 use eth2::types::{
     BeaconBlockHeader, BlobSidecarList, BlockHeaderAndSignature, BlockHeaderData, BlockId, EthSpec,
@@ -7,6 +5,8 @@ use eth2::types::{
     Slot,
 };
 use eth2::{BeaconNodeHttpClient, Error};
+use std::collections::HashMap;
+use std::str::FromStr;
 
 use crate::blob_test_helper::{
     new_blob_sidecars, FIVE, FOUR, ONE, ORIGIN_BLOCK, START_SLOT, THREE, TWO,
@@ -76,7 +76,7 @@ impl Default for BeaconClientStub<MainnetEthSpec> {
             }
         };
 
-        let start_slot: Slot = START_SLOT;
+        let start_slot = Slot::new(START_SLOT);
         let origin_blobs = new_blob_sidecars(1);
         let one_blobs = new_blob_sidecars(2);
         let two_blobs = new_blob_sidecars(0);
@@ -87,17 +87,36 @@ impl Default for BeaconClientStub<MainnetEthSpec> {
         BeaconClientStub {
             headers: HashMap::from([
                 (
-                    ORIGIN_BLOCK.to_string(),
-                    make_header(start_slot, *ORIGIN_BLOCK, Hash256::from_slice(&[9, 9, 9])),
+                    format!("0x{}", hex::encode(ORIGIN_BLOCK.as_bytes())),
+                    make_header(
+                        start_slot,
+                        *ORIGIN_BLOCK,
+                        Hash256::from_str(
+                            "0x0909090000000000000000000000000000000000000000000000000000000000",
+                        )
+                        .unwrap(),
+                    ),
                 ),
                 (
-                    ONE.to_string(),
+                    format!("0x{}", hex::encode(ONE.as_bytes())),
                     make_header(start_slot + 1, *ONE, *ORIGIN_BLOCK),
                 ),
-                (TWO.to_string(), make_header(start_slot + 2, *TWO, *ONE)),
-                (THREE.to_string(), make_header(start_slot + 3, *THREE, *TWO)),
-                (FOUR.to_string(), make_header(start_slot + 4, *FOUR, *THREE)),
-                (FIVE.to_string(), make_header(start_slot + 5, *FIVE, *FOUR)),
+                (
+                    format!("0x{}", hex::encode(TWO.as_bytes())),
+                    make_header(start_slot + 2, *TWO, *ONE),
+                ),
+                (
+                    format!("0x{}", hex::encode(THREE.as_bytes())),
+                    make_header(start_slot + 3, *THREE, *TWO),
+                ),
+                (
+                    format!("0x{}", hex::encode(FOUR.as_bytes())),
+                    make_header(start_slot + 4, *FOUR, *THREE),
+                ),
+                (
+                    format!("0x{}", hex::encode(FIVE.as_bytes())),
+                    make_header(start_slot + 5, *FIVE, *FOUR),
+                ),
                 (
                     "head".to_string(),
                     make_header(start_slot + 5, *FIVE, *FOUR),
@@ -108,7 +127,14 @@ impl Default for BeaconClientStub<MainnetEthSpec> {
                 ),
                 (
                     start_slot.as_u64().to_string(),
-                    make_header(start_slot, *ORIGIN_BLOCK, Hash256::from_slice(&[9, 9, 9])),
+                    make_header(
+                        start_slot,
+                        *ORIGIN_BLOCK,
+                        Hash256::from_str(
+                            "0x0909090000000000000000000000000000000000000000000000000000000000",
+                        )
+                        .unwrap(),
+                    ),
                 ),
                 (
                     (start_slot + 1).as_u64().to_string(),
@@ -133,12 +159,30 @@ impl Default for BeaconClientStub<MainnetEthSpec> {
             ]),
 
             blobs: HashMap::from([
-                (ORIGIN_BLOCK.to_string(), origin_blobs.clone()),
-                (ONE.to_string(), one_blobs.clone()),
-                (TWO.to_string(), two_blobs.clone()),
-                (THREE.to_string(), three_blobs.clone()),
-                (FOUR.to_string(), four_blobs.clone()),
-                (FIVE.to_string(), five_blobs.clone()),
+                (
+                    format!("0x{}", hex::encode(ORIGIN_BLOCK.as_bytes())),
+                    origin_blobs.clone(),
+                ),
+                (
+                    format!("0x{}", hex::encode(ONE.as_bytes())),
+                    one_blobs.clone(),
+                ),
+                (
+                    format!("0x{}", hex::encode(TWO.as_bytes())),
+                    two_blobs.clone(),
+                ),
+                (
+                    format!("0x{}", hex::encode(THREE.as_bytes())),
+                    three_blobs.clone(),
+                ),
+                (
+                    format!("0x{}", hex::encode(FOUR.as_bytes())),
+                    four_blobs.clone(),
+                ),
+                (
+                    format!("0x{}", hex::encode(FIVE.as_bytes())),
+                    five_blobs.clone(),
+                ),
                 ("head".to_string(), five_blobs.clone()),
                 ("finalized".to_string(), three_blobs.clone()),
                 (start_slot.as_u64().to_string(), origin_blobs.clone()),

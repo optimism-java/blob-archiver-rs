@@ -20,6 +20,7 @@ tracing.workspace = true
 tokio.workspace = true
 eyre.workspace = true
 again.workspace = true
+hex.workspace = true
 blob-archiver-storage = { path = "../../crates/storage" }
 blob-archiver-beacon = { path = "../../crates/beacon" }
 

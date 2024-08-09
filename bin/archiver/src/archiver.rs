@@ -1,19 +1,21 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
 use again::RetryPolicy;
-use blob_archiver_beacon::beacon_client::BeaconClient;
-use blob_archiver_storage::{
-    BackfillProcess, BackfillProcesses, BlobData, BlobSidecars, Header, LockFile, Storage,
-};
 use eth2::types::Slot;
 use eth2::types::{BlockHeaderData, BlockId, Hash256};
 use eth2::Error;
 use eyre::{eyre, Result};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::watch::Receiver;
 use tokio::time::{interval, sleep};
 use tracing::log::{debug, error, info, trace};
+
+use blob_archiver_beacon::beacon_client::BeaconClient;
+use blob_archiver_storage::{
+    BackfillProcess, BackfillProcesses, BlobData, BlobSidecars, Header, LockFile, Storage,
+};
 
 #[allow(dead_code)]
 const LIVE_FETCH_BLOB_MAXIMUM_RETRIES: usize = 10;
@@ -450,10 +452,67 @@ mod tests {
     use std::str::FromStr;
     use std::time::Duration;
 
-    use super::*;
-    use blob_archiver_beacon::beacon_client::BeaconClientEth2;
-    use blob_archiver_storage::fs::FSStorage;
     use eth2::{BeaconNodeHttpClient, SensitiveUrl, Timeouts};
+
+    use blob_archiver_beacon::beacon_client::{BeaconClientEth2, BeaconClientStub};
+    use blob_archiver_beacon::blob_test_helper;
+    use blob_archiver_beacon::blob_test_helper::{new_blob_sidecars, START_SLOT};
+    use blob_archiver_storage::fs::FSStorage;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_rearchive_range() {
+        let dir = &PathBuf::from("test_rearchive_range");
+        let storage = FSStorage::new(dir.clone()).await.unwrap();
+        tokio::fs::create_dir_all(dir).await.unwrap();
+        let (_, rx) = tokio::sync::watch::channel(false);
+        let beacon_client = Arc::new(BeaconClientStub::default());
+        let archiver = Archiver::new(beacon_client.clone(), Arc::new(storage), rx);
+
+        let blob_sidecars_data = new_blob_sidecars(6);
+        let blob_data = BlobData {
+            header: Header {
+                beacon_block_hash: *blob_test_helper::THREE,
+            },
+            blob_sidecars: BlobSidecars {
+                data: blob_sidecars_data,
+            },
+        };
+        let res = archiver.storage.write_blob_data(&blob_data).await;
+        assert!(res.is_ok());
+
+        assert!(!archiver.storage.exists(&blob_test_helper::ONE).await);
+        assert!(!archiver.storage.exists(&blob_test_helper::TWO).await);
+        assert!(archiver.storage.exists(&blob_test_helper::THREE).await);
+        assert!(!archiver.storage.exists(&blob_test_helper::FOUR).await);
+
+        let from = START_SLOT + 1;
+        let to = START_SLOT + 4;
+
+        let result = archiver.rearchive_range(from, to).await;
+        assert!(result.error.is_none());
+        assert_eq!(from, result.from);
+        assert_eq!(to, result.to);
+
+        assert!(archiver.storage.exists(&blob_test_helper::ONE).await);
+        assert!(archiver.storage.exists(&blob_test_helper::TWO).await);
+        assert!(archiver.storage.exists(&blob_test_helper::THREE).await);
+        assert!(archiver.storage.exists(&blob_test_helper::FOUR).await);
+
+        assert_eq!(
+            archiver
+                .storage
+                .read_blob_data(&blob_test_helper::THREE)
+                .await
+                .unwrap()
+                .blob_sidecars
+                .data
+                .len(),
+            4
+        );
+        clean_dir(dir);
+    }
 
     #[tokio::test]
     async fn test_persist_blobs_for_block() {

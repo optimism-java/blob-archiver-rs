@@ -13,3 +13,4 @@ async-trait.workspace = true
 eth2.workspace = true
 rand.workspace = true
 once_cell.workspace = true
+hex.workspace = true
