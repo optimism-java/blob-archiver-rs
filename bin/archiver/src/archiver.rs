@@ -9,6 +9,7 @@ use eth2::Error;
 use eyre::{eyre, Result};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch::Receiver;
+use tokio::sync::Mutex;
 use tokio::time::{interval, sleep};
 use tracing::log::{debug, error, info, trace};
 
@@ -53,7 +54,7 @@ pub struct Config {
 pub struct Archiver {
     pub beacon_client: Arc<dyn BeaconClient>,
 
-    storage: Arc<dyn Storage>,
+    storage: Arc<Mutex<dyn Storage>>,
 
     id: String,
 
@@ -65,7 +66,7 @@ pub struct Archiver {
 impl Archiver {
     pub fn new(
         beacon_client: Arc<dyn BeaconClient>,
-        storage: Arc<dyn Storage>,
+        storage: Arc<Mutex<dyn Storage>>,
         shutdown_rx: Receiver<bool>,
     ) -> Self {
         Self {
@@ -91,7 +92,7 @@ impl Archiver {
         match header_resp_opt {
             None => Ok(None),
             Some(header) => {
-                let exists = self.storage.exists(&header.data.root).await;
+                let exists = self.storage.lock().await.exists(&header.data.root).await;
 
                 if exists && !overwrite {
                     return Ok(Some((header.data, true)));
@@ -112,7 +113,7 @@ impl Archiver {
                             data: blob_sidecar_list,
                         },
                     );
-                    self.storage.write_blob_data(blob_data).await?;
+                    self.storage.lock().await.write_blob_data(blob_data).await?;
                     trace!("Persisting blobs for block: {:?}", blob_data);
                     return Ok(Some((header.data, exists)));
                 }
@@ -123,7 +124,7 @@ impl Archiver {
 
     #[allow(dead_code)]
     async fn wait_obtain_storage_lock(&self) {
-        let mut lock_file_res = self.storage.read_lock_file().await;
+        let mut lock_file_res = self.storage.lock().await.read_lock_file().await;
         let mut now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -142,7 +143,7 @@ impl Archiver {
                                 return;
                             }
                             _ = sleep(Duration::from_secs(OBTAIN_LOCK_RETRY_INTERVAL.load(Ordering::Relaxed))) => {
-                                lock_file_res = self.storage.read_lock_file().await;
+                                lock_file_res = self.storage.lock().await.read_lock_file().await;
                                 match lock_file_res {
                                     Ok(new_lock_file) => {
                                         lock_file = new_lock_file;
@@ -163,6 +164,8 @@ impl Archiver {
 
                 let written_res = self
                     .storage
+                    .lock()
+                    .await
                     .write_lock_file(&LockFile {
                         archiver_id: lock_file.archiver_id.clone(),
                         timestamp: now,
@@ -196,7 +199,7 @@ impl Archiver {
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap()
                                     .as_secs();
-                                let written_res = storage.write_lock_file(&LockFile {
+                                let written_res = storage.lock().await.write_lock_file(&LockFile {
                                     archiver_id: archiver_id.clone(),
                                     timestamp: now,
                                 }).await;
@@ -218,7 +221,7 @@ impl Archiver {
 
     #[allow(dead_code)]
     async fn backfill_blobs(&self, latest: &BlockHeaderData) {
-        let backfill_processes_res = self.storage.read_backfill_processes().await;
+        let backfill_processes_res = self.storage.lock().await.read_backfill_processes().await;
 
         match backfill_processes_res {
             Ok(mut backfill_processes) => {
@@ -229,6 +232,8 @@ impl Archiver {
                 backfill_processes.insert(latest.root, backfill_process);
                 let _ = self
                     .storage
+                    .lock()
+                    .await
                     .write_backfill_processes(&backfill_processes)
                     .await;
 
@@ -311,6 +316,8 @@ impl Archiver {
                 backfill_processes.insert(start.root, backfill_process);
                 let _ = self
                     .storage
+                    .lock()
+                    .await
                     .write_backfill_processes(backfill_processes)
                     .await;
             }
@@ -329,6 +336,8 @@ impl Archiver {
         backfill_processes.remove(&start.root);
         let _ = self
             .storage
+            .lock()
+            .await
             .write_backfill_processes(backfill_processes)
             .await;
     }
@@ -451,24 +460,43 @@ mod tests {
     use std::path::PathBuf;
     use std::str::FromStr;
     use std::time::Duration;
-
-    use eth2::{BeaconNodeHttpClient, SensitiveUrl, Timeouts};
+    use tracing_subscriber::fmt;
 
     use blob_archiver_beacon::beacon_client::{BeaconClientEth2, BeaconClientStub};
     use blob_archiver_beacon::blob_test_helper;
     use blob_archiver_beacon::blob_test_helper::{new_blob_sidecars, START_SLOT};
-    use blob_archiver_storage::fs::FSStorage;
+    use blob_archiver_storage::fs::{FSStorage, TestFSStorage};
+    use eth2::types::MainnetEthSpec;
+    use eth2::{BeaconNodeHttpClient, SensitiveUrl, Timeouts};
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
 
     use super::*;
+
+    static INIT: std::sync::Once = std::sync::Once::new();
+    fn setup_tracing() {
+        INIT.call_once(|| {
+            tracing_subscriber::registry().with(fmt::layer()).init();
+        });
+    }
+
+    async fn create_test_archiver(
+        storage: Arc<Mutex<dyn Storage>>,
+    ) -> (Archiver, Arc<BeaconClientStub<MainnetEthSpec>>) {
+        setup_tracing();
+        let (_, rx) = tokio::sync::watch::channel(false);
+        let beacon_client = Arc::new(BeaconClientStub::default());
+        let archiver = Archiver::new(beacon_client.clone(), storage, rx);
+        (archiver, beacon_client)
+    }
 
     #[tokio::test]
     async fn test_rearchive_range() {
         let dir = &PathBuf::from("test_rearchive_range");
         let storage = FSStorage::new(dir.clone()).await.unwrap();
         tokio::fs::create_dir_all(dir).await.unwrap();
-        let (_, rx) = tokio::sync::watch::channel(false);
-        let beacon_client = Arc::new(BeaconClientStub::default());
-        let archiver = Archiver::new(beacon_client.clone(), Arc::new(storage), rx);
+        let test_storage = Arc::new(Mutex::new(TestFSStorage::new(storage).await.unwrap()));
+        let (archiver, beacon_client) = create_test_archiver(test_storage.clone()).await;
 
         let blob_sidecars_data = new_blob_sidecars(6);
         let blob_data = BlobData {
@@ -476,16 +504,62 @@ mod tests {
                 beacon_block_hash: *blob_test_helper::THREE,
             },
             blob_sidecars: BlobSidecars {
-                data: blob_sidecars_data,
+                data: blob_sidecars_data.clone(),
             },
         };
-        let res = archiver.storage.write_blob_data(&blob_data).await;
+        let res = archiver
+            .storage
+            .lock()
+            .await
+            .write_blob_data(&blob_data)
+            .await;
         assert!(res.is_ok());
 
-        assert!(!archiver.storage.exists(&blob_test_helper::ONE).await);
-        assert!(!archiver.storage.exists(&blob_test_helper::TWO).await);
-        assert!(archiver.storage.exists(&blob_test_helper::THREE).await);
-        assert!(!archiver.storage.exists(&blob_test_helper::FOUR).await);
+        assert!(
+            !archiver
+                .storage
+                .lock()
+                .await
+                .exists(&blob_test_helper::ONE)
+                .await
+        );
+        assert!(
+            !archiver
+                .storage
+                .lock()
+                .await
+                .exists(&blob_test_helper::TWO)
+                .await
+        );
+        assert!(
+            archiver
+                .storage
+                .lock()
+                .await
+                .exists(&blob_test_helper::THREE)
+                .await
+        );
+        assert!(
+            !archiver
+                .storage
+                .lock()
+                .await
+                .exists(&blob_test_helper::FOUR)
+                .await
+        );
+
+        assert_eq!(
+            archiver
+                .storage
+                .lock()
+                .await
+                .read_blob_data(&blob_test_helper::THREE)
+                .await
+                .unwrap()
+                .blob_sidecars
+                .data,
+            blob_sidecars_data.clone()
+        );
 
         let from = START_SLOT + 1;
         let to = START_SLOT + 4;
@@ -495,22 +569,295 @@ mod tests {
         assert_eq!(from, result.from);
         assert_eq!(to, result.to);
 
-        assert!(archiver.storage.exists(&blob_test_helper::ONE).await);
-        assert!(archiver.storage.exists(&blob_test_helper::TWO).await);
-        assert!(archiver.storage.exists(&blob_test_helper::THREE).await);
-        assert!(archiver.storage.exists(&blob_test_helper::FOUR).await);
+        assert!(
+            archiver
+                .storage
+                .lock()
+                .await
+                .exists(&blob_test_helper::ONE)
+                .await
+        );
+        assert!(
+            archiver
+                .storage
+                .lock()
+                .await
+                .exists(&blob_test_helper::TWO)
+                .await
+        );
+        assert!(
+            archiver
+                .storage
+                .lock()
+                .await
+                .exists(&blob_test_helper::THREE)
+                .await
+        );
+        assert!(
+            archiver
+                .storage
+                .lock()
+                .await
+                .exists(&blob_test_helper::FOUR)
+                .await
+        );
 
         assert_eq!(
             archiver
                 .storage
+                .lock()
+                .await
                 .read_blob_data(&blob_test_helper::THREE)
                 .await
                 .unwrap()
                 .blob_sidecars
-                .data
-                .len(),
-            4
+                .data,
+            beacon_client
+                .clone()
+                .blobs
+                .get(&format!(
+                    "0x{}",
+                    hex::encode(blob_test_helper::THREE.as_bytes())
+                ))
+                .unwrap()
+                .clone()
         );
+        clean_dir(dir);
+    }
+
+    #[tokio::test]
+    async fn test_archiver_latest_retries_on_failure() {
+        let dir = &PathBuf::from("test_archiver_latest_retries_on_failure");
+        let storage = FSStorage::new(dir.clone()).await.unwrap();
+        tokio::fs::create_dir_all(dir).await.unwrap();
+        let test_storage = Arc::new(Mutex::new(TestFSStorage::new(storage).await.unwrap()));
+        let (archiver, _) = create_test_archiver(test_storage.clone()).await;
+
+        let blob_data = BlobData {
+            header: Header {
+                beacon_block_hash: *blob_test_helper::THREE,
+            },
+            blob_sidecars: BlobSidecars {
+                data: new_blob_sidecars(6),
+            },
+        };
+        let res = archiver
+            .storage
+            .lock()
+            .await
+            .write_blob_data(&blob_data)
+            .await;
+        assert!(res.is_ok());
+
+        assert!(
+            !archiver
+                .storage
+                .lock()
+                .await
+                .exists(&blob_test_helper::FIVE)
+                .await
+        );
+        assert!(
+            !archiver
+                .storage
+                .lock()
+                .await
+                .exists(&blob_test_helper::FOUR)
+                .await
+        );
+        assert!(
+            archiver
+                .storage
+                .lock()
+                .await
+                .exists(&blob_test_helper::THREE)
+                .await
+        );
+
+        test_storage.clone().lock().await.write_fail_times(1).await;
+        archiver.process_blocks_until_known_block().await;
+
+        assert!(
+            archiver
+                .storage
+                .lock()
+                .await
+                .exists(&blob_test_helper::FIVE)
+                .await
+        );
+        assert!(
+            archiver
+                .storage
+                .lock()
+                .await
+                .exists(&blob_test_helper::FOUR)
+                .await
+        );
+        assert!(
+            archiver
+                .storage
+                .lock()
+                .await
+                .exists(&blob_test_helper::THREE)
+                .await
+        );
+        clean_dir(dir);
+    }
+
+    #[tokio::test]
+    async fn test_archiver_latest_halts_on_persistent_error() {
+        let dir = &PathBuf::from("test_archiver_latest_halts_on_persistent_error");
+        let storage = FSStorage::new(dir.clone()).await.unwrap();
+        tokio::fs::create_dir_all(dir).await.unwrap();
+        let test_storage = Arc::new(Mutex::new(TestFSStorage::new(storage).await.unwrap()));
+        let (archiver, beacon_client) = create_test_archiver(test_storage.clone()).await;
+
+        let blob_data = BlobData {
+            header: Header {
+                beacon_block_hash: *blob_test_helper::THREE,
+            },
+            blob_sidecars: BlobSidecars {
+                data: beacon_client
+                    .clone()
+                    .blobs
+                    .get(&format!(
+                        "0x{}",
+                        hex::encode(blob_test_helper::THREE.as_bytes())
+                    ))
+                    .unwrap()
+                    .clone(),
+            },
+        };
+        let res = archiver
+            .storage
+            .lock()
+            .await
+            .write_blob_data(&blob_data)
+            .await;
+        assert!(res.is_ok());
+
+        assert!(
+            archiver
+                .storage
+                .lock()
+                .await
+                .exists(&blob_test_helper::THREE)
+                .await
+        );
+        assert!(
+            !archiver
+                .storage
+                .lock()
+                .await
+                .exists(&blob_test_helper::FOUR)
+                .await
+        );
+        assert!(
+            !archiver
+                .storage
+                .lock()
+                .await
+                .exists(&blob_test_helper::FIVE)
+                .await
+        );
+
+        test_storage
+            .lock()
+            .await
+            .write_fail_times(LIVE_FETCH_BLOB_MAXIMUM_RETRIES + 1)
+            .await;
+        archiver.process_blocks_until_known_block().await;
+        assert!(
+            archiver
+                .storage
+                .lock()
+                .await
+                .exists(&blob_test_helper::THREE)
+                .await
+        );
+        assert!(
+            !archiver
+                .storage
+                .lock()
+                .await
+                .exists(&blob_test_helper::FOUR)
+                .await
+        );
+        assert!(
+            !archiver
+                .storage
+                .lock()
+                .await
+                .exists(&blob_test_helper::FIVE)
+                .await
+        );
+        clean_dir(dir);
+    }
+
+    #[tokio::test]
+    async fn test_archiver_latest_stop_at_origin() {
+        let dir = &PathBuf::from("test_archiver_latest_stop_at_origin");
+        let storage = FSStorage::new(dir.clone()).await.unwrap();
+        tokio::fs::create_dir_all(dir).await.unwrap();
+        let test_storage = Arc::new(Mutex::new(TestFSStorage::new(storage).await.unwrap()));
+        let (archiver, beacon_client) = create_test_archiver(test_storage.clone()).await;
+
+        let blob_data = BlobData {
+            header: Header {
+                beacon_block_hash: *blob_test_helper::ORIGIN_BLOCK,
+            },
+            blob_sidecars: BlobSidecars {
+                data: beacon_client
+                    .clone()
+                    .blobs
+                    .get(&format!(
+                        "0x{}",
+                        hex::encode(blob_test_helper::ORIGIN_BLOCK.as_bytes())
+                    ))
+                    .unwrap()
+                    .clone(),
+            },
+        };
+        let res = archiver
+            .storage
+            .lock()
+            .await
+            .write_blob_data(&blob_data)
+            .await;
+        assert!(res.is_ok());
+
+        let to_write = vec![
+            &blob_test_helper::FIVE,
+            &blob_test_helper::FOUR,
+            &blob_test_helper::THREE,
+            &blob_test_helper::TWO,
+            &blob_test_helper::ONE,
+        ];
+
+        for hash in &to_write {
+            assert!(!archiver.storage.lock().await.exists(hash).await);
+        }
+
+        archiver.process_blocks_until_known_block().await;
+        for hash in &to_write {
+            assert!(archiver.storage.lock().await.exists(hash).await);
+            assert_eq!(
+                archiver
+                    .storage
+                    .lock()
+                    .await
+                    .read_blob_data(hash)
+                    .await
+                    .unwrap()
+                    .blob_sidecars
+                    .data,
+                beacon_client
+                    .blobs
+                    .get(&format!("0x{}", hex::encode(hash.as_bytes())))
+                    .unwrap()
+                    .clone()
+            );
+        }
         clean_dir(dir);
     }
 
@@ -525,7 +872,11 @@ mod tests {
         tokio::fs::create_dir_all(dir).await.unwrap();
         let (_, rx) = tokio::sync::watch::channel(false);
         let beacon_client_eth2 = BeaconClientEth2 { beacon_client };
-        let archiver = Archiver::new(Arc::new(beacon_client_eth2), Arc::new(storage), rx);
+        let archiver = Archiver::new(
+            Arc::new(beacon_client_eth2),
+            Arc::new(Mutex::new(storage)),
+            rx,
+        );
 
         let block_id = BlockId::Head;
         archiver

@@ -62,7 +62,7 @@ pub trait StorageReader {
 
 #[async_trait]
 pub trait StorageWriter {
-    async fn write_blob_data(&self, blob_data: &BlobData) -> Result<()>;
+    async fn write_blob_data(&mut self, blob_data: &BlobData) -> Result<()>;
 
     async fn write_lock_file(&self, lock_file: &LockFile) -> Result<()>;
 

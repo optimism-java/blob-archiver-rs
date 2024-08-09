@@ -141,7 +141,7 @@ impl StorageReader for S3Storage {
 
 #[async_trait]
 impl StorageWriter for S3Storage {
-    async fn write_blob_data(&self, blob_data: &BlobData) -> Result<()> {
+    async fn write_blob_data(&mut self, blob_data: &BlobData) -> Result<()> {
         let blob_path =
             Path::new(&self.path).join(format!("{:x}", blob_data.header.beacon_block_hash));
         let blob_data_bytes = if self.compression {
@@ -234,7 +234,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_read_blob_data() {
-        let (storage, _container) = setup(false).await;
+        let (mut storage, _container) = setup(false).await;
         storage
             .client
             .create_bucket()
@@ -322,7 +322,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_read_blob_data_compressed() {
-        let (storage, _container) = setup(true).await;
+        let (mut storage, _container) = setup(true).await;
         storage
             .client
             .create_bucket()

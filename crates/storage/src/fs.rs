@@ -55,7 +55,7 @@ impl StorageReader for FSStorage {
 
 #[async_trait]
 impl StorageWriter for FSStorage {
-    async fn write_blob_data(&self, blob_data: &BlobData) -> Result<()> {
+    async fn write_blob_data(&mut self, blob_data: &BlobData) -> Result<()> {
         let path = self
             .dir
             .join(format!("{:x}", blob_data.header.beacon_block_hash));
@@ -84,6 +84,67 @@ impl StorageWriter for FSStorage {
     }
 }
 
+pub struct TestFSStorage {
+    pub fs_storage: FSStorage,
+    pub write_fail_count: usize,
+}
+
+impl TestFSStorage {
+    pub async fn new(fs_storage: FSStorage) -> Result<Self> {
+        Ok(Self {
+            fs_storage,
+            write_fail_count: 0,
+        })
+    }
+
+    pub async fn write_fail_times(&mut self, times: usize) {
+        self.write_fail_count = times;
+    }
+}
+
+#[async_trait]
+impl StorageReader for TestFSStorage {
+    async fn read_blob_data(&self, hash: &Hash256) -> Result<BlobData> {
+        self.fs_storage.read_blob_data(hash).await
+    }
+
+    async fn exists(&self, hash: &Hash256) -> bool {
+        self.fs_storage.exists(hash).await
+    }
+
+    async fn read_lock_file(&self) -> Result<LockFile> {
+        self.fs_storage.read_lock_file().await
+    }
+
+    async fn read_backfill_processes(&self) -> Result<BackfillProcesses> {
+        self.fs_storage.read_backfill_processes().await
+    }
+}
+
+#[async_trait]
+impl StorageWriter for TestFSStorage {
+    async fn write_blob_data(&mut self, blob_data: &BlobData) -> Result<()> {
+        if self.write_fail_count > 0 {
+            self.write_fail_count -= 1;
+            return Err(eyre::Error::msg("write fail"));
+        }
+        self.fs_storage.write_blob_data(blob_data).await
+    }
+
+    async fn write_lock_file(&self, lock_file: &LockFile) -> Result<()> {
+        self.fs_storage.write_lock_file(lock_file).await
+    }
+
+    async fn write_backfill_processes(&self, backfill_process: &BackfillProcesses) -> Result<()> {
+        self.fs_storage
+            .write_backfill_processes(backfill_process)
+            .await
+    }
+}
+
+#[async_trait]
+impl Storage for TestFSStorage {}
+
 #[cfg(test)]
 mod tests {
     use tokio::io;
@@ -96,7 +157,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fs_storage() {
-        let storage = FSStorage::new(PathBuf::from("test_fs_storage"))
+        let mut storage = FSStorage::new(PathBuf::from("test_fs_storage"))
             .await
             .unwrap();
         tokio::fs::create_dir_all(&storage.dir).await.unwrap();
@@ -138,7 +199,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fs_storage_exists() {
-        let storage = FSStorage::new(PathBuf::from("test_fs_storage_exists"))
+        let mut storage = FSStorage::new(PathBuf::from("test_fs_storage_exists"))
             .await
             .unwrap();
         tokio::fs::create_dir_all(&storage.dir).await.unwrap();

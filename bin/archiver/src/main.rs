@@ -8,6 +8,7 @@ use blob_archiver_beacon::beacon_client::BeaconClientEth2;
 use blob_archiver_storage::fs::FSStorage;
 use eth2::types::BlockId;
 use eth2::{BeaconNodeHttpClient, SensitiveUrl, Timeouts};
+use tokio::sync::Mutex;
 
 mod archiver;
 
@@ -20,7 +21,11 @@ async fn main() {
     let storage = FSStorage::new(PathBuf::from("test_dir")).await.unwrap();
     let (_, shutdown_rx) = tokio::sync::watch::channel(false);
     let beacon_client_eth2 = BeaconClientEth2 { beacon_client };
-    let archiver = Archiver::new(Arc::new(beacon_client_eth2), Arc::new(storage), shutdown_rx);
+    let archiver = Archiver::new(
+        Arc::new(beacon_client_eth2),
+        Arc::new(Mutex::new(storage)),
+        shutdown_rx,
+    );
 
     let block_id = BlockId::Head;
 
