@@ -22,7 +22,7 @@ async fn main() {
     let (_, shutdown_rx) = tokio::sync::watch::channel(false);
     let beacon_client_eth2 = BeaconClientEth2 { beacon_client };
     let archiver = Archiver::new(
-        Arc::new(beacon_client_eth2),
+        Arc::new(Mutex::new(beacon_client_eth2)),
         Arc::new(Mutex::new(storage)),
         shutdown_rx,
     );
