@@ -17,6 +17,7 @@ use blob_archiver_beacon::beacon_client::BeaconClient;
 use blob_archiver_storage::{
     BackfillProcess, BackfillProcesses, BlobData, BlobSidecars, Header, LockFile, Storage,
 };
+use uuid::Uuid;
 
 #[allow(dead_code)]
 const LIVE_FETCH_BLOB_MAXIMUM_RETRIES: usize = 10;
@@ -31,7 +32,7 @@ const LOCK_UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 #[allow(dead_code)]
 const LOCK_TIMEOUT: Duration = Duration::from_secs(20);
 #[allow(dead_code)]
-const OBTAIN_LOCK_RETRY_INTERVAL_SECS: u64 = 10;
+const OBTAIN_LOCK_RETRY_INTERVAL_SECS: u64 = 2;
 #[allow(dead_code)]
 static OBTAIN_LOCK_RETRY_INTERVAL: AtomicU64 = AtomicU64::new(OBTAIN_LOCK_RETRY_INTERVAL_SECS);
 
@@ -67,13 +68,14 @@ impl Archiver {
     pub fn new(
         beacon_client: Arc<Mutex<dyn BeaconClient>>,
         storage: Arc<Mutex<dyn Storage>>,
+        config: Config,
         shutdown_rx: Receiver<bool>,
     ) -> Self {
         Self {
             beacon_client,
             storage,
-            id: "".to_string(),
-            config: Default::default(),
+            id: Uuid::new_v4().to_string(),
+            config,
             shutdown_rx,
         }
     }
@@ -171,7 +173,7 @@ impl Archiver {
                     .lock()
                     .await
                     .write_lock_file(&LockFile {
-                        archiver_id: lock_file.archiver_id.clone(),
+                        archiver_id: self.id.clone(),
                         timestamp: now,
                     })
                     .await;
@@ -188,13 +190,12 @@ impl Archiver {
 
                 let storage = self.storage.clone();
                 let archiver_id = self.id.clone();
-                let mut shutdown_clone = shutdown.clone();
 
                 tokio::spawn(async move {
                     let mut ticket = interval(LOCK_UPDATE_INTERVAL);
                     loop {
                         tokio::select! {
-                            _ = shutdown_clone.changed() => {
+                            _ = shutdown.changed() => {
                                 info!("Received shutdown signal, exiting lock update loop");
                                 break;
                             }
@@ -486,21 +487,27 @@ mod tests {
 
     async fn create_test_archiver(
         storage: Arc<Mutex<dyn Storage>>,
+        shutdown_rx: Receiver<bool>,
     ) -> (Archiver, Arc<Mutex<BeaconClientStub<MainnetEthSpec>>>) {
         setup_tracing();
-        let (_, rx) = tokio::sync::watch::channel(false);
         let beacon_client = Arc::new(Mutex::new(BeaconClientStub::default()));
-        let archiver = Archiver::new(beacon_client.clone(), storage, rx);
+        let config = Config {
+            poll_interval: Duration::from_secs(5),
+            listen_addr: "".to_string(),
+            origin_block: *blob_test_helper::ORIGIN_BLOCK,
+        };
+        let archiver = Archiver::new(beacon_client.clone(), storage, config, shutdown_rx);
         (archiver, beacon_client)
     }
 
     #[tokio::test]
     async fn test_archiver_fetch_and_persist_overwrite() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
         let dir = &PathBuf::from("test_archiver_fetch_and_persist_overwrite");
         let storage = FSStorage::new(dir.clone()).await.unwrap();
         tokio::fs::create_dir_all(dir).await.unwrap();
         let test_storage = Arc::new(Mutex::new(TestFSStorage::new(storage).await.unwrap()));
-        let (archiver, beacon_client) = create_test_archiver(test_storage.clone()).await;
+        let (archiver, beacon_client) = create_test_archiver(test_storage.clone(), rx).await;
 
         let blob_data = BlobData {
             header: Header {
@@ -593,15 +600,17 @@ mod tests {
         (_, already_exists) = res.unwrap();
         assert!(!already_exists);
         clean_dir(dir);
+        tx.send(true).unwrap();
     }
 
     #[tokio::test]
     async fn test_archiver_fetch_and_persist() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
         let dir = &PathBuf::from("test_fetch_and_persist");
         let storage = FSStorage::new(dir.clone()).await.unwrap();
         tokio::fs::create_dir_all(dir).await.unwrap();
         let test_storage = Arc::new(Mutex::new(TestFSStorage::new(storage).await.unwrap()));
-        let (archiver, _) = create_test_archiver(test_storage.clone()).await;
+        let (archiver, _) = create_test_archiver(test_storage.clone(), rx).await;
 
         assert!(
             !archiver
@@ -648,15 +657,209 @@ mod tests {
                 .await
         );
         clean_dir(dir);
+        tx.send(true).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_archiver_backfill_to_origin() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let dir = &PathBuf::from("test_backfill_to_origin");
+        let storage = FSStorage::new(dir.clone()).await.unwrap();
+        tokio::fs::create_dir_all(dir).await.unwrap();
+        let test_storage = Arc::new(Mutex::new(TestFSStorage::new(storage).await.unwrap()));
+        let (archiver, beacon_client) = create_test_archiver(test_storage.clone(), rx).await;
+
+        let blob_data = BlobData {
+            header: Header {
+                beacon_block_hash: *blob_test_helper::FIVE,
+            },
+            blob_sidecars: BlobSidecars {
+                data: beacon_client
+                    .lock()
+                    .await
+                    .blobs
+                    .get(&format!(
+                        "0x{}",
+                        hex::encode(blob_test_helper::FIVE.as_bytes())
+                    ))
+                    .unwrap()
+                    .clone(),
+            },
+        };
+        let res = archiver
+            .storage
+            .lock()
+            .await
+            .write_blob_data(&blob_data)
+            .await;
+        assert!(res.is_ok());
+
+        let expected_blobs = [
+            *blob_test_helper::FOUR,
+            *blob_test_helper::THREE,
+            *blob_test_helper::TWO,
+            *blob_test_helper::ONE,
+            *blob_test_helper::ORIGIN_BLOCK,
+        ];
+
+        for blob in expected_blobs.iter() {
+            assert!(!archiver.storage.lock().await.exists(blob).await);
+        }
+
+        let head = beacon_client
+            .lock()
+            .await
+            .headers
+            .get(&format!(
+                "0x{}",
+                hex::encode(blob_test_helper::FIVE.as_bytes())
+            ))
+            .unwrap()
+            .clone();
+
+        archiver.backfill_blobs(&head).await;
+
+        for blob in expected_blobs.iter() {
+            assert!(archiver.storage.lock().await.exists(blob).await);
+            assert_eq!(
+                archiver
+                    .storage
+                    .lock()
+                    .await
+                    .read_blob_data(blob)
+                    .await
+                    .unwrap()
+                    .blob_sidecars
+                    .data,
+                beacon_client
+                    .lock()
+                    .await
+                    .blobs
+                    .get(&format!("0x{}", hex::encode(blob.as_bytes())))
+                    .unwrap()
+                    .clone()
+            );
+        }
+        clean_dir(dir);
+        tx.send(true).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_archiver_backfill_to_existing_block() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let dir = &PathBuf::from("test_backfill_to_existing_block");
+        let storage = FSStorage::new(dir.clone()).await.unwrap();
+        tokio::fs::create_dir_all(dir).await.unwrap();
+        let test_storage = Arc::new(Mutex::new(TestFSStorage::new(storage).await.unwrap()));
+        let (archiver, beacon_client) = create_test_archiver(test_storage.clone(), rx).await;
+
+        let mut blob_data = BlobData {
+            header: Header {
+                beacon_block_hash: *blob_test_helper::FIVE,
+            },
+            blob_sidecars: BlobSidecars {
+                data: beacon_client
+                    .lock()
+                    .await
+                    .blobs
+                    .get(&format!(
+                        "0x{}",
+                        hex::encode(blob_test_helper::FIVE.as_bytes())
+                    ))
+                    .unwrap()
+                    .clone(),
+            },
+        };
+        let mut res = archiver
+            .storage
+            .lock()
+            .await
+            .write_blob_data(&blob_data)
+            .await;
+        assert!(res.is_ok());
+
+        blob_data = BlobData {
+            header: Header {
+                beacon_block_hash: *blob_test_helper::ONE,
+            },
+            blob_sidecars: BlobSidecars {
+                data: beacon_client
+                    .lock()
+                    .await
+                    .blobs
+                    .get(&format!(
+                        "0x{}",
+                        hex::encode(blob_test_helper::ONE.as_bytes())
+                    ))
+                    .unwrap()
+                    .clone(),
+            },
+        };
+
+        res = archiver
+            .storage
+            .lock()
+            .await
+            .write_blob_data(&blob_data)
+            .await;
+        assert!(res.is_ok());
+
+        let expected_blobs = [
+            *blob_test_helper::FOUR,
+            *blob_test_helper::THREE,
+            *blob_test_helper::TWO,
+        ];
+
+        for blob in expected_blobs.iter() {
+            assert!(!archiver.storage.lock().await.exists(blob).await);
+        }
+
+        let head = beacon_client
+            .lock()
+            .await
+            .headers
+            .get(&format!(
+                "0x{}",
+                hex::encode(blob_test_helper::FIVE.as_bytes())
+            ))
+            .unwrap()
+            .clone();
+
+        archiver.backfill_blobs(&head).await;
+
+        for blob in expected_blobs.iter() {
+            assert!(archiver.storage.lock().await.exists(blob).await);
+            assert_eq!(
+                archiver
+                    .storage
+                    .lock()
+                    .await
+                    .read_blob_data(blob)
+                    .await
+                    .unwrap()
+                    .blob_sidecars
+                    .data,
+                beacon_client
+                    .lock()
+                    .await
+                    .blobs
+                    .get(&format!("0x{}", hex::encode(blob.as_bytes())))
+                    .unwrap()
+                    .clone()
+            );
+        }
+        clean_dir(dir);
+        tx.send(true).unwrap();
     }
 
     #[tokio::test]
     async fn test_rearchive_range() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
         let dir = &PathBuf::from("test_rearchive_range");
         let storage = FSStorage::new(dir.clone()).await.unwrap();
         tokio::fs::create_dir_all(dir).await.unwrap();
         let test_storage = Arc::new(Mutex::new(TestFSStorage::new(storage).await.unwrap()));
-        let (archiver, beacon_client) = create_test_archiver(test_storage.clone()).await;
+        let (archiver, beacon_client) = create_test_archiver(test_storage.clone(), rx).await;
 
         let blob_sidecars_data = new_blob_sidecars(6);
         let blob_data = BlobData {
@@ -785,15 +988,231 @@ mod tests {
                 .clone()
         );
         clean_dir(dir);
+        tx.send(true).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_archiver_obtain_lock_file() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let dir = &PathBuf::from("test_archiver_obtain_lock_file");
+        let storage = FSStorage::new(dir.clone()).await.unwrap();
+        tokio::fs::create_dir_all(dir).await.unwrap();
+        let test_storage = Arc::new(Mutex::new(TestFSStorage::new(storage).await.unwrap()));
+        let (archiver, _) = create_test_archiver(test_storage.clone(), rx).await;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let expired = now - 19;
+
+        let res = archiver
+            .storage
+            .lock()
+            .await
+            .write_lock_file(&LockFile {
+                archiver_id: "FAKEID".to_string(),
+                timestamp: expired,
+            })
+            .await;
+        assert!(res.is_ok());
+
+        archiver.wait_obtain_storage_lock().await;
+        let lock_file_res = archiver.storage.lock().await.read_lock_file().await;
+        assert!(lock_file_res.is_ok());
+        let lock_file = lock_file_res.unwrap();
+        assert_eq!(lock_file.archiver_id, archiver.id);
+        assert!(lock_file.timestamp >= now);
+        sleep(Duration::from_secs(11)).await;
+        clean_dir(dir);
+        tx.send(true).unwrap();
+        sleep(Duration::from_secs(1)).await;
+    }
+
+    #[tokio::test]
+    async fn test_archiver_backfill_finish_old_process() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let dir = &PathBuf::from("test_archiver_backfill_finish_old_process");
+        let storage = FSStorage::new(dir.clone()).await.unwrap();
+        tokio::fs::create_dir_all(dir).await.unwrap();
+        let test_storage = Arc::new(Mutex::new(TestFSStorage::new(storage).await.unwrap()));
+        let (archiver, beacon_client) = create_test_archiver(test_storage.clone(), rx).await;
+
+        let mut blob_data = BlobData {
+            header: Header {
+                beacon_block_hash: *blob_test_helper::FIVE,
+            },
+            blob_sidecars: BlobSidecars {
+                data: beacon_client
+                    .lock()
+                    .await
+                    .blobs
+                    .get(&format!(
+                        "0x{}",
+                        hex::encode(blob_test_helper::FIVE.as_bytes())
+                    ))
+                    .unwrap()
+                    .clone(),
+            },
+        };
+        let mut res = archiver
+            .storage
+            .lock()
+            .await
+            .write_blob_data(&blob_data)
+            .await;
+        assert!(res.is_ok());
+
+        blob_data = BlobData {
+            header: Header {
+                beacon_block_hash: *blob_test_helper::THREE,
+            },
+            blob_sidecars: BlobSidecars {
+                data: beacon_client
+                    .lock()
+                    .await
+                    .blobs
+                    .get(&format!(
+                        "0x{}",
+                        hex::encode(blob_test_helper::THREE.as_bytes())
+                    ))
+                    .unwrap()
+                    .clone(),
+            },
+        };
+        res = archiver
+            .storage
+            .lock()
+            .await
+            .write_blob_data(&blob_data)
+            .await;
+        assert!(res.is_ok());
+
+        blob_data = BlobData {
+            header: Header {
+                beacon_block_hash: *blob_test_helper::ONE,
+            },
+            blob_sidecars: BlobSidecars {
+                data: beacon_client
+                    .lock()
+                    .await
+                    .blobs
+                    .get(&format!(
+                        "0x{}",
+                        hex::encode(blob_test_helper::ONE.as_bytes())
+                    ))
+                    .unwrap()
+                    .clone(),
+            },
+        };
+
+        res = archiver
+            .storage
+            .lock()
+            .await
+            .write_blob_data(&blob_data)
+            .await;
+        assert!(res.is_ok());
+
+        let expected_blobs = [*blob_test_helper::FOUR, *blob_test_helper::TWO];
+
+        for blob in expected_blobs.iter() {
+            assert!(!archiver.storage.lock().await.exists(blob).await);
+        }
+
+        let res = archiver
+            .storage
+            .lock()
+            .await
+            .read_backfill_processes()
+            .await;
+        assert!(res.is_ok());
+        let mut backfill_processes = res.unwrap();
+        assert_eq!(backfill_processes, BackfillProcesses::default());
+
+        let three = beacon_client
+            .lock()
+            .await
+            .headers
+            .get(&format!(
+                "0x{}",
+                hex::encode(blob_test_helper::THREE.as_bytes())
+            ))
+            .unwrap()
+            .clone();
+        backfill_processes.insert(
+            *blob_test_helper::THREE,
+            BackfillProcess {
+                start_block: three.clone(),
+                current_block: three.clone(),
+            },
+        );
+
+        let res = archiver
+            .storage
+            .lock()
+            .await
+            .write_backfill_processes(&backfill_processes)
+            .await;
+        assert!(res.is_ok());
+        assert_eq!(
+            backfill_processes,
+            archiver
+                .storage
+                .lock()
+                .await
+                .read_backfill_processes()
+                .await
+                .unwrap()
+        );
+
+        let head = beacon_client
+            .lock()
+            .await
+            .headers
+            .get(&format!(
+                "0x{}",
+                hex::encode(blob_test_helper::FIVE.as_bytes())
+            ))
+            .unwrap()
+            .clone();
+
+        archiver.backfill_blobs(&head).await;
+
+        for expected_blob in expected_blobs.iter() {
+            assert!(archiver.storage.lock().await.exists(expected_blob).await);
+            assert_eq!(
+                archiver
+                    .storage
+                    .lock()
+                    .await
+                    .read_blob_data(expected_blob)
+                    .await
+                    .unwrap()
+                    .blob_sidecars
+                    .data,
+                beacon_client
+                    .lock()
+                    .await
+                    .blobs
+                    .get(&format!("0x{}", hex::encode(expected_blob.as_bytes())))
+                    .unwrap()
+                    .clone()
+            );
+        }
+
+        clean_dir(dir);
+        tx.send(true).unwrap();
     }
 
     #[tokio::test]
     async fn test_archiver_latest_retries_on_failure() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
         let dir = &PathBuf::from("test_archiver_latest_retries_on_failure");
         let storage = FSStorage::new(dir.clone()).await.unwrap();
         tokio::fs::create_dir_all(dir).await.unwrap();
         let test_storage = Arc::new(Mutex::new(TestFSStorage::new(storage).await.unwrap()));
-        let (archiver, _) = create_test_archiver(test_storage.clone()).await;
+        let (archiver, _) = create_test_archiver(test_storage.clone(), rx).await;
 
         let blob_data = BlobData {
             header: Header {
@@ -864,15 +1283,17 @@ mod tests {
                 .await
         );
         clean_dir(dir);
+        tx.send(true).unwrap();
     }
 
     #[tokio::test]
     async fn test_archiver_latest_halts_on_persistent_error() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
         let dir = &PathBuf::from("test_archiver_latest_halts_on_persistent_error");
         let storage = FSStorage::new(dir.clone()).await.unwrap();
         tokio::fs::create_dir_all(dir).await.unwrap();
         let test_storage = Arc::new(Mutex::new(TestFSStorage::new(storage).await.unwrap()));
-        let (archiver, beacon_client) = create_test_archiver(test_storage.clone()).await;
+        let (archiver, beacon_client) = create_test_archiver(test_storage.clone(), rx).await;
 
         let blob_data = BlobData {
             header: Header {
@@ -955,15 +1376,17 @@ mod tests {
                 .await
         );
         clean_dir(dir);
+        tx.send(true).unwrap();
     }
 
     #[tokio::test]
     async fn test_archiver_latest_stop_at_origin() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
         let dir = &PathBuf::from("test_archiver_latest_stop_at_origin");
         let storage = FSStorage::new(dir.clone()).await.unwrap();
         tokio::fs::create_dir_all(dir).await.unwrap();
         let test_storage = Arc::new(Mutex::new(TestFSStorage::new(storage).await.unwrap()));
-        let (archiver, beacon_client) = create_test_archiver(test_storage.clone()).await;
+        let (archiver, beacon_client) = create_test_archiver(test_storage.clone(), rx).await;
 
         let blob_data = BlobData {
             header: Header {
@@ -1025,15 +1448,17 @@ mod tests {
             );
         }
         clean_dir(dir);
+        tx.send(true).unwrap();
     }
 
     #[tokio::test]
     async fn test_archiver_latest_consumes_new_blocks() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
         let dir = &PathBuf::from("test_archiver_latest_consumes_new_blocks");
         let storage = FSStorage::new(dir.clone()).await.unwrap();
         tokio::fs::create_dir_all(dir).await.unwrap();
         let test_storage = Arc::new(Mutex::new(TestFSStorage::new(storage).await.unwrap()));
-        let (archiver, beacon_client) = create_test_archiver(test_storage.clone()).await;
+        let (archiver, beacon_client) = create_test_archiver(test_storage.clone(), rx).await;
 
         let mut head = beacon_client
             .lock()
@@ -1151,15 +1576,17 @@ mod tests {
                 .await
         );
         clean_dir(dir);
+        tx.send(true).unwrap();
     }
 
     #[tokio::test]
     async fn test_archiver_latest_no_new_data() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
         let dir = &PathBuf::from("test_archiver_latest_no_new_data");
         let storage = FSStorage::new(dir.clone()).await.unwrap();
         tokio::fs::create_dir_all(dir).await.unwrap();
         let test_storage = Arc::new(Mutex::new(TestFSStorage::new(storage).await.unwrap()));
-        let (archiver, beacon_client) = create_test_archiver(test_storage.clone()).await;
+        let (archiver, beacon_client) = create_test_archiver(test_storage.clone(), rx).await;
 
         let root = beacon_client
             .lock()
@@ -1229,15 +1656,17 @@ mod tests {
                 .await
         );
         clean_dir(dir);
+        tx.send(true).unwrap();
     }
 
     #[tokio::test]
     async fn test_archiver_latest_stops_at_existing_block() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
         let dir = &PathBuf::from("test_archiver_latest_stops_at_existing_block");
         let storage = FSStorage::new(dir.clone()).await.unwrap();
         tokio::fs::create_dir_all(dir).await.unwrap();
         let test_storage = Arc::new(Mutex::new(TestFSStorage::new(storage).await.unwrap()));
-        let (archiver, beacon_client) = create_test_archiver(test_storage.clone()).await;
+        let (archiver, beacon_client) = create_test_archiver(test_storage.clone(), rx).await;
 
         let blob_data = BlobData {
             header: Header {
@@ -1371,6 +1800,7 @@ mod tests {
                 .clone()
         );
         clean_dir(dir);
+        tx.send(true).unwrap();
     }
 
     #[tokio::test]
@@ -1384,9 +1814,15 @@ mod tests {
         tokio::fs::create_dir_all(dir).await.unwrap();
         let (_, rx) = tokio::sync::watch::channel(false);
         let beacon_client_eth2 = BeaconClientEth2 { beacon_client };
+        let config = Config {
+            poll_interval: Duration::from_secs(5),
+            listen_addr: "".to_string(),
+            origin_block: *blob_test_helper::ORIGIN_BLOCK,
+        };
         let archiver = Archiver::new(
             Arc::new(Mutex::new(beacon_client_eth2)),
             Arc::new(Mutex::new(storage)),
+            config,
             rx,
         );
 

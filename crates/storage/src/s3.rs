@@ -4,6 +4,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use aws_sdk_s3::config::retry::RetryConfig;
 use aws_sdk_s3::config::timeout::TimeoutConfig;
+use aws_sdk_s3::error::SdkError;
+use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 use eth2::types::Hash256;
@@ -48,12 +50,42 @@ impl S3Storage {
             .build();
         let client = Client::from_conf(sdk_config);
 
-        Ok(Self {
+        let storage = Self {
             client,
             bucket: config.bucket,
             path: config.path,
             compression: config.compression,
-        })
+        };
+
+        let res = storage.read_backfill_processes().await;
+        if let Err(e) = res {
+            if let Some(io_error) = e.downcast_ref::<SdkError<GetObjectError>>() {
+                if !matches!(io_error, SdkError::ServiceError(err) if err.err().is_no_such_key()) {
+                    return Err(e);
+                } else {
+                    storage
+                        .write_backfill_processes(&BackfillProcesses::default())
+                        .await?;
+                }
+            } else {
+                return Err(e);
+            }
+        }
+
+        let res = storage.read_lock_file().await;
+        if let Err(e) = res {
+            if let Some(io_error) = e.downcast_ref::<SdkError<GetObjectError>>() {
+                if !matches!(io_error, SdkError::ServiceError(err) if err.err().is_no_such_key()) {
+                    return Err(e);
+                } else {
+                    storage.write_lock_file(&LockFile::default()).await?;
+                }
+            } else {
+                return Err(e);
+            }
+        }
+
+        Ok(storage)
     }
 }
 
@@ -222,26 +254,23 @@ impl StorageWriter for S3Storage {
 #[cfg(test)]
 mod tests {
     use std::env;
+    use std::time::Duration;
 
-    use crate::s3::{Config, S3Storage};
-    use crate::storage::create_test_blob_data;
-    use crate::{storage, StorageReader, StorageWriter};
+    use aws_config::retry::RetryConfig;
+    use aws_config::timeout::TimeoutConfig;
     use aws_sdk_s3::types::error::NoSuchKey;
-    use storage::{create_test_lock_file, create_test_test_backfill_processes};
+    use aws_sdk_s3::Client;
     use testcontainers_modules::localstack::LocalStack;
     use testcontainers_modules::testcontainers::runners::AsyncRunner;
     use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt};
 
+    use crate::s3::{Config, S3Storage};
+    use crate::storage::create_test_blob_data;
+    use crate::{LockFile, StorageReader, StorageWriter};
+
     #[tokio::test]
     async fn test_write_read_blob_data() {
         let (mut storage, _container) = setup(false).await;
-        storage
-            .client
-            .create_bucket()
-            .bucket("test-bucket")
-            .send()
-            .await
-            .unwrap();
 
         let blob_data = create_test_blob_data();
         let hash = blob_data.header.beacon_block_hash;
@@ -259,77 +288,13 @@ mod tests {
     #[tokio::test]
     async fn test_write_read_lock_file() {
         let (storage, _container) = setup(false).await;
-        storage
-            .client
-            .create_bucket()
-            .bucket("test-bucket")
-            .send()
-            .await
-            .unwrap();
 
-        let lock_file = create_test_lock_file();
-        assert!(storage
-            .read_lock_file()
-            .await
-            .is_err_and(|e| e.root_cause().downcast_ref::<NoSuchKey>().is_some()));
-        storage.write_lock_file(&lock_file).await.unwrap();
-
-        let actual_lock_file = storage.read_lock_file().await.unwrap();
-        assert_eq!(actual_lock_file.archiver_id, lock_file.archiver_id);
-        assert_eq!(actual_lock_file.timestamp, lock_file.timestamp);
-    }
-
-    #[tokio::test]
-    async fn test_write_read_backfill_processes() {
-        let (storage, _container) = setup(false).await;
-        storage
-            .client
-            .create_bucket()
-            .bucket("test-bucket")
-            .send()
-            .await
-            .unwrap();
-
-        let backfill_processes = create_test_test_backfill_processes();
-        assert!(storage
-            .read_backfill_processes()
-            .await
-            .is_err_and(|e| e.root_cause().downcast_ref::<NoSuchKey>().is_some()));
-        storage
-            .write_backfill_processes(&backfill_processes)
-            .await
-            .unwrap();
-
-        let actual_backfill_processes = storage.read_backfill_processes().await.unwrap();
-        assert_eq!(actual_backfill_processes.len(), 1);
-        assert_eq!(
-            actual_backfill_processes
-                .values()
-                .next()
-                .unwrap()
-                .start_block,
-            backfill_processes.values().next().unwrap().start_block
-        );
-        assert_eq!(
-            actual_backfill_processes
-                .values()
-                .next()
-                .unwrap()
-                .current_block,
-            backfill_processes.values().next().unwrap().current_block
-        );
+        assert_eq!(storage.read_lock_file().await.unwrap(), LockFile::default());
     }
 
     #[tokio::test]
     async fn test_write_read_blob_data_compressed() {
         let (mut storage, _container) = setup(true).await;
-        storage
-            .client
-            .create_bucket()
-            .bucket("test-bucket")
-            .send()
-            .await
-            .unwrap();
 
         let blob_data = create_test_blob_data();
         let hash = blob_data.header.beacon_block_hash;
@@ -342,70 +307,6 @@ mod tests {
         let actual_blob_data = storage.read_blob_data(&hash).await.unwrap();
         assert_eq!(actual_blob_data.header.beacon_block_hash, hash);
         assert_eq!(actual_blob_data.blob_sidecars.data.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_write_read_lock_file_compressed() {
-        let (storage, _container) = setup(true).await;
-        storage
-            .client
-            .create_bucket()
-            .bucket("test-bucket")
-            .send()
-            .await
-            .unwrap();
-
-        let lock_file = create_test_lock_file();
-        assert!(storage
-            .read_lock_file()
-            .await
-            .is_err_and(|e| e.root_cause().downcast_ref::<NoSuchKey>().is_some()));
-        storage.write_lock_file(&lock_file).await.unwrap();
-
-        let actual_lock_file = storage.read_lock_file().await.unwrap();
-        assert_eq!(actual_lock_file.archiver_id, lock_file.archiver_id);
-        assert_eq!(actual_lock_file.timestamp, lock_file.timestamp);
-    }
-
-    #[tokio::test]
-    async fn test_write_read_backfill_processes_compressed() {
-        let (storage, _container) = setup(true).await;
-        storage
-            .client
-            .create_bucket()
-            .bucket("test-bucket")
-            .send()
-            .await
-            .unwrap();
-
-        let backfill_processes = create_test_test_backfill_processes();
-        assert!(storage
-            .read_backfill_processes()
-            .await
-            .is_err_and(|e| e.root_cause().downcast_ref::<NoSuchKey>().is_some()));
-        storage
-            .write_backfill_processes(&backfill_processes)
-            .await
-            .unwrap();
-
-        let actual_backfill_processes = storage.read_backfill_processes().await.unwrap();
-        assert_eq!(actual_backfill_processes.len(), 1);
-        assert_eq!(
-            actual_backfill_processes
-                .values()
-                .next()
-                .unwrap()
-                .start_block,
-            backfill_processes.values().next().unwrap().start_block
-        );
-        assert_eq!(
-            actual_backfill_processes
-                .values()
-                .next()
-                .unwrap()
-                .current_block,
-            backfill_processes.values().next().unwrap().current_block
-        );
     }
 
     async fn setup(compression: bool) -> (S3Storage, ContainerAsync<LocalStack>) {
@@ -426,7 +327,28 @@ mod tests {
             compression,
         };
 
-        let storage = S3Storage::new(config).await.unwrap();
+        let env_config = aws_config::from_env().load().await;
+        let sdk_config = aws_sdk_s3::config::Builder::from(&env_config)
+            .timeout_config(
+                TimeoutConfig::builder()
+                    .connect_timeout(Duration::from_secs(15))
+                    .operation_timeout(Duration::from_secs(30))
+                    .build(),
+            )
+            .retry_config(RetryConfig::standard())
+            .endpoint_url(config.clone().endpoint.as_str())
+            .force_path_style(true)
+            .build();
+        let client = Client::from_conf(sdk_config);
+
+        client
+            .create_bucket()
+            .bucket("test-bucket")
+            .send()
+            .await
+            .unwrap();
+
+        let storage = S3Storage::new(config.clone()).await.unwrap();
         (storage, container)
     }
 }

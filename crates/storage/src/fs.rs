@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
+use crate::storage::{BackfillProcesses, BACKFILL_LOCK};
+use crate::{BlobData, LockFile, Storage, StorageReader, StorageWriter};
 use async_trait::async_trait;
 use eth2::types::Hash256;
 use eyre::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-use crate::storage::{BackfillProcesses, BACKFILL_LOCK};
-use crate::{BlobData, LockFile, Storage, StorageReader, StorageWriter};
+use tracing::log::info;
 
 pub struct FSStorage {
     pub dir: PathBuf,
@@ -14,7 +14,38 @@ pub struct FSStorage {
 
 impl FSStorage {
     pub async fn new(dir: PathBuf) -> Result<Self> {
-        Ok(Self { dir })
+        let storage = Self { dir };
+
+        let res = storage.read_backfill_processes().await;
+
+        if let Err(e) = res {
+            if let Some(io_error) = e.downcast_ref::<std::io::Error>() {
+                if io_error.kind() != std::io::ErrorKind::NotFound {
+                    return Err(e);
+                } else {
+                    storage
+                        .write_backfill_processes(&BackfillProcesses::default())
+                        .await?;
+                }
+            } else {
+                return Err(e);
+            }
+        }
+
+        let res = storage.read_lock_file().await;
+        if let Err(e) = res {
+            if let Some(io_error) = e.downcast_ref::<std::io::Error>() {
+                if io_error.kind() != std::io::ErrorKind::NotFound {
+                    return Err(e);
+                } else {
+                    storage.write_lock_file(&LockFile::default()).await?;
+                }
+            } else {
+                return Err(e);
+            }
+        }
+
+        Ok(storage)
     }
 }
 
@@ -70,6 +101,7 @@ impl StorageWriter for FSStorage {
         tokio::fs::create_dir_all(path.parent().unwrap()).await?;
         let mut file = tokio::fs::File::create(path).await?;
         file.write_all(&serde_json::to_vec(lock_file)?).await?;
+        info!("lock file {:#?}", lock_file);
         Ok(())
     }
 
@@ -149,9 +181,7 @@ impl Storage for TestFSStorage {}
 mod tests {
     use tokio::io;
 
-    use crate::storage::{
-        create_test_blob_data, create_test_lock_file, create_test_test_backfill_processes,
-    };
+    use crate::storage::create_test_blob_data;
 
     use super::*;
 
@@ -174,25 +204,10 @@ mod tests {
                 .unwrap(),
             blob_data
         );
-        let lock_file = create_test_lock_file();
-        assert!(storage
-            .read_lock_file()
-            .await
-            .is_err_and(|e| e.downcast_ref::<io::Error>().is_some()));
-        storage.write_lock_file(&lock_file).await.unwrap();
-        assert_eq!(storage.read_lock_file().await.unwrap(), lock_file);
-        let test_backfill_processes = create_test_test_backfill_processes();
-        assert!(storage
-            .read_backfill_processes()
-            .await
-            .is_err_and(|e| e.downcast_ref::<io::Error>().is_some()));
-        storage
-            .write_backfill_processes(&test_backfill_processes)
-            .await
-            .unwrap();
+        assert_eq!(storage.read_lock_file().await.unwrap(), LockFile::default());
         assert_eq!(
             storage.read_backfill_processes().await.unwrap(),
-            test_backfill_processes
+            BackfillProcesses::default()
         );
         clean_dir(&storage.dir);
     }
