@@ -13,7 +13,7 @@ use crate::blob_test_helper::{
 };
 
 #[async_trait]
-pub trait BeaconClient {
+pub trait BeaconClient: Send + Sync {
     async fn get_beacon_headers_block_id(
         &self,
         block_id: BlockId,

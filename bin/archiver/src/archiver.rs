@@ -22,7 +22,7 @@ use uuid::Uuid;
 #[allow(dead_code)]
 const LIVE_FETCH_BLOB_MAXIMUM_RETRIES: usize = 10;
 #[allow(dead_code)]
-const STARTUP_FETCH_BLOB_MAXIMUM_RETRIES: usize = 3;
+pub const STARTUP_FETCH_BLOB_MAXIMUM_RETRIES: usize = 3;
 #[allow(dead_code)]
 const REARCHIVE_MAXIMUM_RETRIES: usize = 3;
 #[allow(dead_code)]
@@ -32,7 +32,7 @@ const LOCK_UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 #[allow(dead_code)]
 const LOCK_TIMEOUT: Duration = Duration::from_secs(20);
 #[allow(dead_code)]
-const OBTAIN_LOCK_RETRY_INTERVAL_SECS: u64 = 2;
+const OBTAIN_LOCK_RETRY_INTERVAL_SECS: u64 = 10;
 #[allow(dead_code)]
 static OBTAIN_LOCK_RETRY_INTERVAL: AtomicU64 = AtomicU64::new(OBTAIN_LOCK_RETRY_INTERVAL_SECS);
 
@@ -129,7 +129,7 @@ impl Archiver {
     }
 
     #[allow(dead_code)]
-    async fn wait_obtain_storage_lock(&self) {
+    pub(crate) async fn wait_obtain_storage_lock(&self) {
         let mut lock_file_res = self.storage.lock().await.read_lock_file().await;
         let mut now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -225,7 +225,7 @@ impl Archiver {
     }
 
     #[allow(dead_code)]
-    async fn backfill_blobs(&self, latest: &BlockHeaderData) {
+    pub(crate) async fn backfill_blobs(&self, latest: BlockHeaderData) {
         let backfill_processes_res = self.storage.lock().await.read_backfill_processes().await;
 
         match backfill_processes_res {
@@ -234,7 +234,7 @@ impl Archiver {
                     start_block: latest.clone(),
                     current_block: latest.clone(),
                 };
-                backfill_processes.insert(latest.root, backfill_process);
+                backfill_processes.insert(latest.clone().root, backfill_process);
                 let _ = self
                     .storage
                     .lock()
@@ -394,7 +394,7 @@ impl Archiver {
     }
 
     #[allow(dead_code)]
-    async fn track_latest_block(&self) {
+    pub(crate) async fn track_latest_block(&self) {
         let mut ticket = interval(self.config.poll_interval);
         let mut shutdown_rx = self.shutdown_rx.clone();
         loop {
@@ -411,10 +411,7 @@ impl Archiver {
     }
 
     #[allow(dead_code)]
-    async fn start(&self) {}
-
-    #[allow(dead_code)]
-    async fn rearchive_range(&self, from: u64, to: u64) -> RearchiveResp {
+    pub async fn rearchive_range(&self, from: u64, to: u64) -> RearchiveResp {
         for i in from..=to {
             info!("rearchiving block: {}", i);
             let retry_policy = RetryPolicy::exponential(Duration::from_millis(250))
@@ -468,6 +465,7 @@ mod tests {
     use tracing_subscriber::fmt;
 
     use super::*;
+    use crate::INIT;
     use blob_archiver_beacon::beacon_client::{BeaconClientEth2, BeaconClientStub};
     use blob_archiver_beacon::blob_test_helper;
     use blob_archiver_beacon::blob_test_helper::{new_blob_sidecars, START_SLOT};
@@ -478,14 +476,13 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    static INIT: std::sync::Once = std::sync::Once::new();
     fn setup_tracing() {
         INIT.call_once(|| {
             tracing_subscriber::registry().with(fmt::layer()).init();
         });
     }
 
-    async fn create_test_archiver(
+    pub async fn create_test_archiver(
         storage: Arc<Mutex<dyn Storage>>,
         shutdown_rx: Receiver<bool>,
     ) -> (Archiver, Arc<Mutex<BeaconClientStub<MainnetEthSpec>>>) {
@@ -717,7 +714,7 @@ mod tests {
             .unwrap()
             .clone();
 
-        archiver.backfill_blobs(&head).await;
+        archiver.backfill_blobs(head).await;
 
         for blob in expected_blobs.iter() {
             assert!(archiver.storage.lock().await.exists(blob).await);
@@ -825,7 +822,7 @@ mod tests {
             .unwrap()
             .clone();
 
-        archiver.backfill_blobs(&head).await;
+        archiver.backfill_blobs(head).await;
 
         for blob in expected_blobs.iter() {
             assert!(archiver.storage.lock().await.exists(blob).await);
@@ -1177,7 +1174,7 @@ mod tests {
             .unwrap()
             .clone();
 
-        archiver.backfill_blobs(&head).await;
+        archiver.backfill_blobs(head).await;
 
         for expected_blob in expected_blobs.iter() {
             assert!(archiver.storage.lock().await.exists(expected_blob).await);
