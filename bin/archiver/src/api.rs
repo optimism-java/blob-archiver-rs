@@ -1,9 +1,10 @@
-use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use crate::archiver::Archiver;
 use serde::Serialize;
-use warp::reject::Reject;
+use warp::http::header::CONTENT_TYPE;
+use warp::http::{HeaderValue, StatusCode};
+use warp::hyper::Body;
 use warp::{Filter, Rejection, Reply};
 
 pub struct Api {
@@ -18,18 +19,15 @@ struct RearchiveResponse {
     block_end: u64,
 }
 
-impl Debug for RearchiveResponse {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RearchiveResponse")
-            .field("success", &self.success)
-            .field("message", &self.message)
-            .field("block_start", &self.block_start)
-            .field("block_end", &self.block_end)
-            .finish()
+impl Reply for RearchiveResponse {
+    fn into_response(self) -> warp::reply::Response {
+        let body = serde_json::to_string(&self).unwrap();
+        let mut res = warp::reply::Response::new(Body::from(body));
+        res.headers_mut()
+            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        res
     }
 }
-
-impl Reject for RearchiveResponse {}
 
 impl Api {
     pub fn new(archiver: Archiver) -> Self {
@@ -42,6 +40,7 @@ impl Api {
         let archiver = self.archiver.clone();
         warp::path!("rearchive")
             .and(warp::get())
+            // todo: make validation error return json https://stackoverflow.com/questions/60554783/is-there-a-way-to-do-validation-as-part-of-a-filter-in-warp
             .and(warp::query::<RearchiveQuery>())
             .and(warp::any().map(move || archiver.clone()))
             .and_then(Self::rearchive_range)
@@ -61,35 +60,53 @@ impl Api {
         archiver: Arc<Archiver>,
     ) -> Result<impl Reply, Rejection> {
         if query.from.is_none() || query.to.is_none() {
-            return Err(warp::reject::custom(RearchiveResponse {
-                success: false,
-                message: "Invalid query parameters".to_string(),
-                block_start: 0,
-                block_end: 0,
-            }));
+            return Ok(warp::reply::with_status(
+                RearchiveResponse {
+                    success: false,
+                    message: "Invalid query parameters".to_string(),
+                    block_start: 0,
+                    block_end: 0,
+                },
+                StatusCode::BAD_REQUEST,
+            ));
         }
 
         if query.from > query.to {
-            return Err(warp::reject::custom(RearchiveResponse {
-                success: false,
-                message: "Invalid query parameters".to_string(),
-                block_start: 0,
-                block_end: 0,
-            }));
+            return Ok(warp::reply::with_status(
+                RearchiveResponse {
+                    success: false,
+                    message: "Invalid query parameters".to_string(),
+                    block_start: 0,
+                    block_end: 0,
+                },
+                StatusCode::BAD_REQUEST,
+            ));
         }
 
         let res = archiver
             .rearchive_range(query.from.unwrap(), query.to.unwrap())
             .await;
         if res.error.is_some() {
-            return Err(warp::reject::custom(RearchiveResponse {
-                success: false,
-                message: res.error.unwrap(),
+            return Ok(warp::reply::with_status(
+                RearchiveResponse {
+                    success: false,
+                    message: res.error.unwrap(),
+                    block_start: 0,
+                    block_end: 0,
+                },
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ));
+        }
+
+        Ok(warp::reply::with_status(
+            RearchiveResponse {
+                success: true,
+                message: "Rearchive successful".to_string(),
                 block_start: res.from,
                 block_end: res.to,
-            }));
-        }
-        Ok(warp::reply::json(&res))
+            },
+            StatusCode::OK,
+        ))
     }
 }
 
@@ -102,6 +119,7 @@ struct RearchiveQuery {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::str::from_utf8;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -157,10 +175,7 @@ mod tests {
             .await;
 
         assert_eq!(res.status(), 200);
-        assert_eq!(
-            std::str::from_utf8(res.body()).unwrap(),
-            "{\"status\":\"ok\"}"
-        );
+        assert_eq!(from_utf8(res.body()).unwrap(), "{\"status\":\"ok\"}");
         clean_dir(dir);
     }
 
@@ -172,12 +187,54 @@ mod tests {
         tokio::fs::create_dir_all(dir).await.unwrap();
         let test_storage = Arc::new(Mutex::new(TestFSStorage::new(storage).await.unwrap()));
         let (archiver, _) = create_test_archiver(test_storage.clone(), rx).await;
-        let res = warp::test::request()
+        let api = Api::new(archiver);
+        let mut res = warp::test::request()
             .method("GET")
             .path("/rearchive?from=2001&to=2000")
-            .reply(&Api::new(archiver).routes())
+            .reply(&api.routes())
             .await;
-        assert_eq!(res.status(), 500);
+        assert_eq!(res.status(), 400);
+        assert_eq!(from_utf8(res.body()).unwrap(), "{\"success\":false,\"message\":\"Invalid query parameters\",\"block_start\":0,\"block_end\":0}");
+
+        res = warp::test::request()
+            .method("GET")
+            .path("/rearchive?to=2000")
+            .reply(&api.routes())
+            .await;
+        assert_eq!(res.status(), 400);
+        assert_eq!(from_utf8(res.body()).unwrap(), "{\"success\":false,\"message\":\"Invalid query parameters\",\"block_start\":0,\"block_end\":0}");
+
+        res = warp::test::request()
+            .method("GET")
+            .path("/rearchive?from=2000")
+            .reply(&api.routes())
+            .await;
+        assert_eq!(res.status(), 400);
+        assert_eq!(from_utf8(res.body()).unwrap(), "{\"success\":false,\"message\":\"Invalid query parameters\",\"block_start\":0,\"block_end\":0}");
+
+        res = warp::test::request()
+            .method("GET")
+            .path("/rearchive?from=bbb&to=2000")
+            .reply(&api.routes())
+            .await;
+        assert_eq!(res.status(), 400);
+        assert_eq!(from_utf8(res.body()).unwrap(), "Invalid query string");
+
+        res = warp::test::request()
+            .method("GET")
+            .path("/rearchive?from=100&to=aaa")
+            .reply(&api.routes())
+            .await;
+        assert_eq!(res.status(), 400);
+        assert_eq!(from_utf8(res.body()).unwrap(), "Invalid query string");
+
+        res = warp::test::request()
+            .method("GET")
+            .path("/rearchive?from=11&to=15")
+            .reply(&api.routes())
+            .await;
+        assert_eq!(res.status(), 200);
+        assert_eq!(from_utf8(res.body()).unwrap(), "{\"success\":true,\"message\":\"Rearchive successful\",\"block_start\":11,\"block_end\":15}");
         clean_dir(dir);
     }
 
