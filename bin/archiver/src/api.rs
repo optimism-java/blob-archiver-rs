@@ -7,10 +7,12 @@ use warp::http::{HeaderValue, StatusCode};
 use warp::hyper::Body;
 use warp::{Filter, Rejection, Reply};
 
+#[allow(dead_code)]
 pub struct Api {
     archiver: Arc<Archiver>,
 }
 
+#[allow(dead_code)]
 #[derive(Serialize)]
 struct RearchiveResponse {
     success: bool,
@@ -30,12 +32,14 @@ impl Reply for RearchiveResponse {
 }
 
 impl Api {
+    #[allow(dead_code)]
     pub fn new(archiver: Archiver) -> Self {
         Self {
             archiver: Arc::new(archiver),
         }
     }
 
+    #[allow(dead_code)]
     pub fn routes(&self) -> impl Filter<Extract = impl Reply, Error = Rejection> + Clone {
         let archiver = self.archiver.clone();
         warp::path!("rearchive")
@@ -49,12 +53,14 @@ impl Api {
                 .and_then(Self::healthz))
     }
 
+    #[allow(dead_code)]
     async fn healthz() -> Result<impl Reply, Rejection> {
         Ok(warp::reply::json(&serde_json::json!({
             "status": "ok"
         })))
     }
 
+    #[allow(dead_code)]
     async fn rearchive_range(
         query: RearchiveQuery,
         archiver: Arc<Archiver>,
@@ -112,7 +118,10 @@ impl Api {
 
 #[derive(serde::Deserialize)]
 struct RearchiveQuery {
+    #[allow(dead_code)]
     from: Option<u64>,
+
+    #[allow(dead_code)]
     to: Option<u64>,
 }
 
@@ -180,9 +189,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rearchive_range() {
+    async fn test_api_rearchive_range() {
         let (_, rx) = tokio::sync::watch::channel(false);
-        let dir = &PathBuf::from("test_rearchive_range");
+        let dir = &PathBuf::from("test_api_rearchive_range");
         let storage = FSStorage::new(dir.clone()).await.unwrap();
         tokio::fs::create_dir_all(dir).await.unwrap();
         let test_storage = Arc::new(Mutex::new(TestFSStorage::new(storage).await.unwrap()));
