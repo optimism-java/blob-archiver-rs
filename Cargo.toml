@@ -13,6 +13,7 @@ exclude = ["**/target", "benches/", "tests"]
 
 [workspace.dependencies]
 eth2 = { git = "https://github.com/sigp/lighthouse.git", tag = "v5.2.1" }
+warp_utils = { git = "https://github.com/sigp/lighthouse.git", tag = "v5.2.1" }
 
 clap = "4"
 futures-util = "0.3"
@@ -35,3 +36,4 @@ hex = "0.4.3"
 tracing-subscriber = "0.3.18"
 uuid = { version = "1.10.0", features = ["v4", "fast-rng", "macro-diagnostics"] }
 warp = "0.3.2"
+ssz_rs = "0.9.0"
