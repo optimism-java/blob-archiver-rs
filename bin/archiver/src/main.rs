@@ -3,14 +3,17 @@ use again::RetryPolicy;
 use blob_archiver_beacon::beacon_client::BeaconClientEth2;
 use blob_archiver_beacon::blob_test_helper;
 use blob_archiver_storage::fs::FSStorage;
+use clap::Parser;
 use eth2::types::BlockId;
 use eth2::{BeaconNodeHttpClient, SensitiveUrl, Timeouts};
+use serde::Serialize;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::log::error;
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -73,4 +76,27 @@ fn setup_tracing() {
     INIT.call_once(|| {
         tracing_subscriber::registry().with(fmt::layer()).init();
     });
+}
+
+#[allow(dead_code)]
+fn setup_logging() {
+    // Create a rolling file appender
+    let file_appender = RollingFileAppender::new(Rotation::DAILY, "logs/", "app.log");
+
+    // Create a subscriber that uses the rolling file appender
+    let subscriber = tracing_subscriber::registry()
+        .with(fmt::Layer::new().with_writer(file_appender))
+        .with(tracing_subscriber::EnvFilter::from_default_env());
+
+    // Set the subscriber as the global default
+    tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
+}
+
+#[derive(Parser, Serialize)]
+struct CliArgs {
+    #[clap(short, long, action = clap::ArgAction::Count, default_value = "3")]
+    verbose: u8,
+
+    #[clap(short, long, default_value = "logs")]
+    log_dir: Option<String>,
 }

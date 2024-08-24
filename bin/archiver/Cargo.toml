@@ -24,6 +24,7 @@ hex.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 warp.workspace = true
+tracing-appender.workspace = true
 blob-archiver-storage = { path = "../../crates/storage" }
 blob-archiver-beacon = { path = "../../crates/beacon" }
 
