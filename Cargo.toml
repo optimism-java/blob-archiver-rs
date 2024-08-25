@@ -1,5 +1,5 @@
 [workspace]
-members = ["bin/archiver", "bin/api", "crates/config", "crates/storage", "crates/beacon"]
+members = ["bin/archiver", "bin/api", "crates/storage", "crates/beacon"]
 default-members = ["bin/archiver", "bin/api"]
 resolver = "2"
 

@@ -10,16 +10,16 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 use eth2::types::Hash256;
 use eyre::Result;
+use serde::{Deserialize, Serialize};
 use tracing::info;
 use tracing::log::trace;
 
-use storage::BackfillProcesses;
+use crate::storage::{BackfillProcesses, BlobData, LockFile, StorageReader, StorageWriter};
 
 use crate::storage::BACKFILL_LOCK;
-use crate::{storage, BlobData, LockFile, StorageReader, StorageWriter};
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Config {
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct S3Config {
     pub endpoint: String,
     pub bucket: String,
     pub path: String,
@@ -35,7 +35,7 @@ pub struct S3Storage {
 }
 
 impl S3Storage {
-    pub async fn new(config: Config) -> Result<Self> {
+    pub async fn new(config: S3Config) -> Result<Self> {
         let env_config = aws_config::from_env().load().await;
         let sdk_config = aws_sdk_s3::config::Builder::from(&env_config)
             .timeout_config(
@@ -264,9 +264,9 @@ mod tests {
     use testcontainers_modules::testcontainers::runners::AsyncRunner;
     use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt};
 
-    use crate::s3::{Config, S3Storage};
-    use crate::storage::create_test_blob_data;
-    use crate::{LockFile, StorageReader, StorageWriter};
+    use crate::s3::{S3Config, S3Storage};
+    use crate::storage::{create_test_blob_data, LockFile};
+    use crate::storage::{StorageReader, StorageWriter};
 
     #[tokio::test]
     async fn test_write_read_blob_data() {
@@ -320,7 +320,7 @@ mod tests {
         env::set_var("AWS_SECRET_ACCESS_KEY", "test");
         env::set_var("AWS_REGION", "us-east-1");
 
-        let config = Config {
+        let config = S3Config {
             endpoint: format!("http://{}:{}", host_ip, host_port),
             bucket: "test-bucket".to_string(),
             path: "blobs".to_string(),

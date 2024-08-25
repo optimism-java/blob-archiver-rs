@@ -1,3 +1,6 @@
+use crate::blob_test_helper::{
+    new_blob_sidecars, FIVE, FOUR, ONE, ORIGIN_BLOCK, START_SLOT, THREE, TWO,
+};
 use async_trait::async_trait;
 use eth2::types::{
     BeaconBlockHeader, BlobSidecarList, BlockHeaderAndSignature, BlockHeaderData, BlockId, EthSpec,
@@ -5,12 +8,16 @@ use eth2::types::{
     Slot,
 };
 use eth2::{BeaconNodeHttpClient, Error};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::time::Duration;
 
-use crate::blob_test_helper::{
-    new_blob_sidecars, FIVE, FOUR, ONE, ORIGIN_BLOCK, START_SLOT, THREE, TWO,
-};
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Config {
+    pub beacon_endpoint: String,
+    pub beacon_client_timeout: Duration,
+}
 
 #[async_trait]
 pub trait BeaconClient: Send + Sync {

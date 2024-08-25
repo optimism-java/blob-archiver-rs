@@ -142,7 +142,7 @@ mod tests {
     use blob_archiver_beacon::beacon_client::BeaconClientStub;
     use blob_archiver_beacon::blob_test_helper;
     use blob_archiver_storage::fs::{FSStorage, TestFSStorage};
-    use blob_archiver_storage::Storage;
+    use blob_archiver_storage::storage::Storage;
 
     use crate::api::Api;
     use crate::archiver::{Archiver, Config};
@@ -164,6 +164,8 @@ mod tests {
             poll_interval: Duration::from_secs(5),
             listen_addr: "".to_string(),
             origin_block: *blob_test_helper::ORIGIN_BLOCK,
+            beacon_config: Default::default(),
+            storage_config: Default::default(),
         };
         let archiver = Archiver::new(beacon_client.clone(), storage, config, shutdown_rx);
         (archiver, beacon_client)

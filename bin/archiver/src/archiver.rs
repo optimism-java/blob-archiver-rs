@@ -13,8 +13,10 @@ use tokio::sync::Mutex;
 use tokio::time::{interval, sleep};
 use tracing::log::{debug, error, info, trace};
 
+use blob_archiver_beacon::beacon_client;
 use blob_archiver_beacon::beacon_client::BeaconClient;
-use blob_archiver_storage::{
+use blob_archiver_storage::storage;
+use blob_archiver_storage::storage::{
     BackfillProcess, BackfillProcesses, BlobData, BlobSidecars, Header, LockFile, Storage,
 };
 use uuid::Uuid;
@@ -50,6 +52,10 @@ pub struct Config {
     pub listen_addr: String,
 
     pub origin_block: Hash256,
+
+    pub beacon_config: beacon_client::Config,
+
+    pub storage_config: storage::Config,
 }
 
 pub struct Archiver {
@@ -470,7 +476,7 @@ mod tests {
     use blob_archiver_beacon::blob_test_helper;
     use blob_archiver_beacon::blob_test_helper::{new_blob_sidecars, START_SLOT};
     use blob_archiver_storage::fs::{FSStorage, TestFSStorage};
-    use blob_archiver_storage::StorageReader;
+    use blob_archiver_storage::storage::StorageReader;
     use eth2::types::MainnetEthSpec;
     use eth2::{BeaconNodeHttpClient, SensitiveUrl, Timeouts};
     use tracing_subscriber::layer::SubscriberExt;
@@ -492,6 +498,8 @@ mod tests {
             poll_interval: Duration::from_secs(5),
             listen_addr: "".to_string(),
             origin_block: *blob_test_helper::ORIGIN_BLOCK,
+            beacon_config: Default::default(),
+            storage_config: Default::default(),
         };
         let archiver = Archiver::new(beacon_client.clone(), storage, config, shutdown_rx);
         (archiver, beacon_client)
@@ -1815,6 +1823,8 @@ mod tests {
             poll_interval: Duration::from_secs(5),
             listen_addr: "".to_string(),
             origin_block: *blob_test_helper::ORIGIN_BLOCK,
+            beacon_config: Default::default(),
+            storage_config: Default::default(),
         };
         let archiver = Archiver::new(
             Arc::new(Mutex::new(beacon_client_eth2)),

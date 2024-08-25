@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::storage::{BackfillProcesses, BACKFILL_LOCK};
-use crate::{BlobData, LockFile, Storage, StorageReader, StorageWriter};
+use crate::storage::{BlobData, LockFile, Storage, StorageReader, StorageWriter};
 use async_trait::async_trait;
 use eth2::types::Hash256;
 use eyre::Result;

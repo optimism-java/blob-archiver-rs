@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-
+use crate::s3::S3Config;
 use async_trait::async_trait;
 use eth2::types::{
     BeaconBlockHeader, BlobSidecarList, BlockHeaderAndSignature, BlockHeaderData, Hash256,
@@ -8,9 +7,25 @@ use eth2::types::{
 use eyre::Result;
 use serde::{Deserialize, Serialize};
 use spin::Mutex;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 pub type BackfillProcesses = HashMap<Hash256, BackfillProcess>;
 pub static BACKFILL_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Debug, PartialEq, Eq, Clone, Default, Serialize, Deserialize)]
+pub enum StorageType {
+    #[default]
+    FS,
+    S3,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Default, Serialize, Deserialize)]
+pub struct Config {
+    pub storage_type: StorageType,
+    pub s3_config: S3Config,
+    pub fs_dir: PathBuf,
+}
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct BackfillProcess {

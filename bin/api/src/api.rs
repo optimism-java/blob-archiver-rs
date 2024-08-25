@@ -9,7 +9,7 @@ use warp::{reply, Filter, Rejection, Reply};
 use warp_utils::query::multi_key_query;
 
 use blob_archiver_beacon::beacon_client::BeaconClient;
-use blob_archiver_storage::Storage;
+use blob_archiver_storage::storage::Storage;
 
 pub struct Api {
     #[allow(dead_code)]
@@ -155,7 +155,7 @@ mod tests {
     use blob_archiver_beacon::beacon_client::BeaconClientStub;
     use blob_archiver_beacon::blob_test_helper;
     use blob_archiver_storage::fs::{FSStorage, TestFSStorage};
-    use blob_archiver_storage::{BlobData, BlobSidecars, Header, StorageWriter};
+    use blob_archiver_storage::storage::{BlobData, BlobSidecars, Header, StorageWriter};
 
     use crate::INIT;
 
