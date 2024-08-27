@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 use tokio::time::{interval, sleep};
 use tracing::log::{debug, error, info, trace};
 
+use crate::LogConfig;
 use blob_archiver_beacon::beacon_client;
 use blob_archiver_beacon::beacon_client::BeaconClient;
 use blob_archiver_storage::storage;
@@ -56,6 +57,8 @@ pub struct Config {
     pub beacon_config: beacon_client::Config,
 
     pub storage_config: storage::Config,
+
+    pub log_config: LogConfig,
 }
 
 pub struct Archiver {
@@ -500,6 +503,7 @@ mod tests {
             origin_block: *blob_test_helper::ORIGIN_BLOCK,
             beacon_config: Default::default(),
             storage_config: Default::default(),
+            log_config: Default::default(),
         };
         let archiver = Archiver::new(beacon_client.clone(), storage, config, shutdown_rx);
         (archiver, beacon_client)
@@ -1825,6 +1829,7 @@ mod tests {
             origin_block: *blob_test_helper::ORIGIN_BLOCK,
             beacon_config: Default::default(),
             storage_config: Default::default(),
+            log_config: Default::default(),
         };
         let archiver = Archiver::new(
             Arc::new(Mutex::new(beacon_client_eth2)),

@@ -1,23 +1,29 @@
-use crate::archiver::{Archiver, Config, STARTUP_FETCH_BLOB_MAXIMUM_RETRIES};
-use again::RetryPolicy;
-use blob_archiver_beacon::beacon_client::BeaconClientEth2;
-use blob_archiver_beacon::blob_test_helper;
-use blob_archiver_storage::fs::FSStorage;
-use clap::Parser;
-use eth2::types::BlockId;
-use eth2::{BeaconNodeHttpClient, SensitiveUrl, Timeouts};
-use serde::Serialize;
 use std::fs;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+
+use again::RetryPolicy;
+use clap::Parser;
+use eth2::types::{BlockId, Hash256};
+use eth2::{BeaconNodeHttpClient, SensitiveUrl, Timeouts};
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracing::log::error;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter};
+
+use blob_archiver_beacon::beacon_client::BeaconClientEth2;
+use blob_archiver_beacon::{beacon_client, blob_test_helper};
+use blob_archiver_storage::fs::FSStorage;
+use blob_archiver_storage::s3::S3Config;
+use blob_archiver_storage::storage;
+use blob_archiver_storage::storage::StorageType;
+
+use crate::archiver::{Archiver, Config, STARTUP_FETCH_BLOB_MAXIMUM_RETRIES};
 
 mod api;
 mod archiver;
@@ -27,7 +33,9 @@ static INIT: std::sync::Once = std::sync::Once::new();
 #[tokio::main]
 async fn main() {
     let args = CliArgs::parse();
-    println!("{}", args.verbose);
+
+    let config = args.to_config();
+    println!("{:#?}", config);
     init_logging(0, None, None);
     let beacon_client = BeaconNodeHttpClient::new(
         SensitiveUrl::from_str("https://ethereum-beacon-api.publicnode.com").unwrap(),
@@ -42,6 +50,7 @@ async fn main() {
         origin_block: *blob_test_helper::ORIGIN_BLOCK,
         beacon_config: Default::default(),
         storage_config: Default::default(),
+        log_config: Default::default(),
     };
     let archiver = Archiver::new(
         Arc::new(Mutex::new(beacon_client_eth2)),
@@ -128,14 +137,14 @@ pub fn setup_tracing(
 
 #[derive(Parser, Serialize)]
 pub struct CliArgs {
-    #[clap(short='v', long, action = clap::ArgAction::Count, default_value = "3")]
+    #[clap(short = 'v', long, action = clap::ArgAction::Count, default_value = "3")]
     verbose: u8,
 
-    #[clap(long, default_value = "logs")]
-    log_dir: String,
+    #[clap(long)]
+    log_dir: Option<String>,
 
-    #[clap(long, default_value = "DAILY")]
-    log_rotation: String,
+    #[clap(long, help = "Log rotation values: DAILY, HOURLY, MINUTELY, NEVER")]
+    log_rotation: Option<String>,
 
     #[clap(long, required = true)]
     beacon_endpoint: String,
@@ -168,4 +177,244 @@ pub struct CliArgs {
     s3_compress: Option<bool>,
     #[clap(long)]
     fs_dir: Option<String>,
+}
+
+impl CliArgs {
+    fn to_config(&self) -> Config {
+        let log_config = LogConfig {
+            log_dir: self.log_dir.as_ref().map(PathBuf::from),
+            log_rotation: self.log_rotation.clone(),
+            verbose: self.verbose,
+        };
+
+        let beacon_config = beacon_client::Config {
+            beacon_endpoint: self.beacon_endpoint.clone(),
+            beacon_client_timeout: Duration::from_secs(self.beacon_client_timeout),
+        };
+
+        let storage_type = StorageType::from_str(self.storage_type.as_str()).unwrap();
+
+        let s3_config = if storage_type == StorageType::S3 {
+            Some(S3Config {
+                endpoint: self.s3_endpoint.clone().unwrap(),
+                bucket: self.s3_bucket.clone().unwrap(),
+                path: self.s3_path.clone().unwrap(),
+                compression: self.s3_compress.unwrap(),
+            })
+        } else {
+            None
+        };
+
+        let fs_dir = self.fs_dir.as_ref().map(PathBuf::from);
+
+        let storage_config = storage::Config {
+            storage_type,
+            s3_config,
+            fs_dir,
+        };
+
+        let mut padded_hex = self
+            .origin_block
+            .strip_prefix("0x")
+            .unwrap_or(&self.origin_block)
+            .to_string();
+        padded_hex = format!("{:0<64}", padded_hex);
+        let origin_block = Hash256::from_slice(&hex::decode(padded_hex).expect("Invalid hex"));
+
+        Config {
+            poll_interval: Duration::from_secs(self.poll_interval),
+            listen_addr: self.listen_addr.clone(),
+            origin_block,
+            beacon_config,
+            storage_config,
+            log_config,
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn to_rotation(s: &str) -> Rotation {
+    match s {
+        "DAILY" => Rotation::DAILY,
+        "HOURLY" => Rotation::HOURLY,
+        "MINUTELY" => Rotation::MINUTELY,
+        _ => Rotation::NEVER,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    use eth2::types::Hash256;
+
+    use blob_archiver_storage::s3::S3Config;
+
+    use crate::storage::StorageType;
+    use crate::CliArgs;
+
+    #[test]
+    fn test_cli_args_to_config_s3_storage() {
+        let cli_args = CliArgs {
+            verbose: 3,
+            log_dir: Some("logs".to_string()),
+            log_rotation: Some("DAILY".to_string()),
+            beacon_endpoint: "http://localhost:5052".to_string(),
+            beacon_client_timeout: 10,
+            poll_interval: 6,
+            listen_addr: "0.0.0.0:8000".to_string(),
+            origin_block: "0x1234".to_string(),
+            storage_type: "s3".to_string(),
+            s3_endpoint: Some("https://s3.amazonaws.com".to_string()),
+            s3_bucket: Some("my-bucket".to_string()),
+            s3_path: Some("my-path".to_string()),
+            s3_compress: Some(true),
+            fs_dir: None,
+        };
+
+        let config = cli_args.to_config();
+
+        assert_eq!(config.poll_interval, Duration::from_secs(6));
+        assert_eq!(config.listen_addr, "0.0.0.0:8000");
+        assert_eq!(
+            config.origin_block,
+            Hash256::from_slice(
+                &hex::decode("1234000000000000000000000000000000000000000000000000000000000000")
+                    .unwrap()
+            )
+        );
+        assert_eq!(
+            config.beacon_config.beacon_endpoint,
+            "http://localhost:5052"
+        );
+        assert_eq!(
+            config.beacon_config.beacon_client_timeout,
+            Duration::from_secs(10)
+        );
+        assert_eq!(config.storage_config.storage_type, StorageType::S3);
+        assert_eq!(
+            config.storage_config.s3_config,
+            Some(S3Config {
+                endpoint: "https://s3.amazonaws.com".to_string(),
+                bucket: "my-bucket".to_string(),
+                path: "my-path".to_string(),
+                compression: true,
+            })
+        );
+        assert_eq!(config.storage_config.fs_dir, None);
+    }
+
+    #[test]
+    fn test_cli_args_to_config_fs_storage() {
+        let cli_args = CliArgs {
+            verbose: 3,
+            log_dir: Some("logs".to_string()),
+            log_rotation: Some("DAILY".to_string()),
+            beacon_endpoint: "http://localhost:5052".to_string(),
+            beacon_client_timeout: 10,
+            poll_interval: 6,
+            listen_addr: "0.0.0.0:8000".to_string(),
+            origin_block: "0xabcd".to_string(),
+            storage_type: "fs".to_string(),
+            s3_endpoint: None,
+            s3_bucket: None,
+            s3_path: None,
+            s3_compress: None,
+            fs_dir: Some("/path/to/storage".to_string()),
+        };
+
+        let config = cli_args.to_config();
+
+        assert_eq!(config.poll_interval, Duration::from_secs(6));
+        assert_eq!(config.listen_addr, "0.0.0.0:8000");
+        assert_eq!(
+            config.origin_block,
+            Hash256::from_slice(
+                &hex::decode("abcd000000000000000000000000000000000000000000000000000000000000")
+                    .unwrap()
+            )
+        );
+        assert_eq!(
+            config.beacon_config.beacon_endpoint,
+            "http://localhost:5052"
+        );
+        assert_eq!(
+            config.beacon_config.beacon_client_timeout,
+            Duration::from_secs(10)
+        );
+        assert_eq!(config.storage_config.storage_type, StorageType::FS);
+        assert_eq!(config.storage_config.s3_config, None);
+        assert_eq!(
+            config.storage_config.fs_dir,
+            Some(PathBuf::from("/path/to/storage"))
+        );
+    }
+
+    #[test]
+    fn test_cli_args_to_config_origin_block_padding() {
+        let cli_args = CliArgs {
+            verbose: 3,
+            log_dir: Some("logs".to_string()),
+            log_rotation: Some("DAILY".to_string()),
+            beacon_endpoint: "http://localhost:5052".to_string(),
+            beacon_client_timeout: 10,
+            poll_interval: 6,
+            listen_addr: "0.0.0.0:8000".to_string(),
+            origin_block: "0x1".to_string(),
+            storage_type: "fs".to_string(),
+            s3_endpoint: None,
+            s3_bucket: None,
+            s3_path: None,
+            s3_compress: None,
+            fs_dir: Some("/path/to/storage".to_string()),
+        };
+
+        let config = cli_args.to_config();
+
+        assert_eq!(
+            config.origin_block,
+            Hash256::from_slice(
+                &hex::decode("1000000000000000000000000000000000000000000000000000000000000000")
+                    .unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn test_cli_args_to_config_origin_block_without_prefix() {
+        let cli_args = CliArgs {
+            verbose: 3,
+            log_dir: Some("logs".to_string()),
+            log_rotation: Some("DAILY".to_string()),
+            beacon_endpoint: "http://localhost:5052".to_string(),
+            beacon_client_timeout: 10,
+            poll_interval: 6,
+            listen_addr: "0.0.0.0:8000".to_string(),
+            origin_block: "ff".to_string(),
+            storage_type: "fs".to_string(),
+            s3_endpoint: None,
+            s3_bucket: None,
+            s3_path: None,
+            s3_compress: None,
+            fs_dir: Some("/path/to/storage".to_string()),
+        };
+
+        let config = cli_args.to_config();
+
+        assert_eq!(
+            config.origin_block,
+            Hash256::from_slice(
+                &hex::decode("ff00000000000000000000000000000000000000000000000000000000000000")
+                    .unwrap()
+            )
+        );
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Default, Serialize, Deserialize)]
+pub struct LogConfig {
+    log_dir: Option<PathBuf>,
+    log_rotation: Option<String>,
+    verbose: u8,
 }

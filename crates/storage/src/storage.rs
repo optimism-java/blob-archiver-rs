@@ -20,11 +20,23 @@ pub enum StorageType {
     S3,
 }
 
+impl std::str::FromStr for StorageType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "fs" => Ok(StorageType::FS),
+            "s3" => Ok(StorageType::S3),
+            _ => Err(format!("Invalid storage type: {}", s)),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     pub storage_type: StorageType,
-    pub s3_config: S3Config,
-    pub fs_dir: PathBuf,
+    pub s3_config: Option<S3Config>,
+    pub fs_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]

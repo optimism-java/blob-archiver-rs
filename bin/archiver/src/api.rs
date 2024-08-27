@@ -166,6 +166,7 @@ mod tests {
             origin_block: *blob_test_helper::ORIGIN_BLOCK,
             beacon_config: Default::default(),
             storage_config: Default::default(),
+            log_config: Default::default(),
         };
         let archiver = Archiver::new(beacon_client.clone(), storage, config, shutdown_rx);
         (archiver, beacon_client)
