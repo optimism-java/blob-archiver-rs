@@ -38,3 +38,4 @@ tracing-appender = "0.2.3"
 uuid = { version = "1.10.0", features = ["v4", "fast-rng", "macro-diagnostics"] }
 warp = "0.3.2"
 ssz_rs = "0.9.0"
+ctrlc = { version = "3.2.3", features = ["termination"] }

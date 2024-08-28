@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use again::RetryPolicy;
 use clap::Parser;
+use ctrlc::set_handler;
 use eth2::types::{BlockId, Hash256};
 use eth2::{BeaconNodeHttpClient, SensitiveUrl, Timeouts};
 use serde::{Deserialize, Serialize};
@@ -16,12 +17,12 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter};
 
+use blob_archiver_beacon::beacon_client;
 use blob_archiver_beacon::beacon_client::BeaconClientEth2;
-use blob_archiver_beacon::{beacon_client, blob_test_helper};
 use blob_archiver_storage::fs::FSStorage;
-use blob_archiver_storage::s3::S3Config;
+use blob_archiver_storage::s3::{S3Config, S3Storage};
 use blob_archiver_storage::storage;
-use blob_archiver_storage::storage::StorageType;
+use blob_archiver_storage::storage::{Storage, StorageType};
 
 use crate::archiver::{Archiver, Config, STARTUP_FETCH_BLOB_MAXIMUM_RETRIES};
 
@@ -34,27 +35,47 @@ static INIT: std::sync::Once = std::sync::Once::new();
 async fn main() {
     let args = CliArgs::parse();
 
-    let config = args.to_config();
-    println!("{:#?}", config);
-    init_logging(0, None, None);
-    let beacon_client = BeaconNodeHttpClient::new(
-        SensitiveUrl::from_str("https://ethereum-beacon-api.publicnode.com").unwrap(),
-        Timeouts::set_all(Duration::from_secs(30)),
+    let config: Config = args.to_config();
+    init_logging(
+        config.log_config.verbose,
+        config.log_config.log_dir.clone(),
+        config
+            .log_config
+            .log_rotation
+            .clone()
+            .map(|s| to_rotation(s.as_str())),
     );
-    let storage = FSStorage::new(PathBuf::from("test_dir")).await.unwrap();
-    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let beacon_client_eth2 = BeaconClientEth2 { beacon_client };
-    let config = Config {
-        poll_interval: Duration::from_secs(5),
-        listen_addr: "".to_string(),
-        origin_block: *blob_test_helper::ORIGIN_BLOCK,
-        beacon_config: Default::default(),
-        storage_config: Default::default(),
-        log_config: Default::default(),
+    let beacon_client = BeaconNodeHttpClient::new(
+        SensitiveUrl::from_str(config.beacon_config.beacon_endpoint.as_str()).unwrap(),
+        Timeouts::set_all(config.beacon_config.beacon_client_timeout),
+    );
+    let storage: Arc<Mutex<dyn Storage>> = if config.storage_config.storage_type == StorageType::FS
+    {
+        Arc::new(Mutex::new(
+            FSStorage::new(config.storage_config.fs_dir.clone().unwrap())
+                .await
+                .unwrap(),
+        ))
+    } else {
+        Arc::new(Mutex::new(
+            S3Storage::new(config.storage_config.s3_config.clone().unwrap())
+                .await
+                .unwrap(),
+        ))
     };
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    set_handler(move || {
+        tracing::info!("shutting down");
+        shutdown_tx
+            .send(true)
+            .expect("could not send shutdown signal");
+    })
+    .expect("could not register shutdown handler");
+
+    let beacon_client_eth2 = BeaconClientEth2 { beacon_client };
     let archiver = Archiver::new(
         Arc::new(Mutex::new(beacon_client_eth2)),
-        Arc::new(Mutex::new(storage)),
+        storage,
         config,
         shutdown_rx,
     );

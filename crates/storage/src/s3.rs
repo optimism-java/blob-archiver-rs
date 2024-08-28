@@ -1,6 +1,9 @@
 use std::path::Path;
 use std::time::Duration;
 
+use crate::storage::{
+    BackfillProcesses, BlobData, LockFile, Storage, StorageReader, StorageWriter,
+};
 use async_trait::async_trait;
 use aws_sdk_s3::config::retry::RetryConfig;
 use aws_sdk_s3::config::timeout::TimeoutConfig;
@@ -13,8 +16,6 @@ use eyre::Result;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 use tracing::log::trace;
-
-use crate::storage::{BackfillProcesses, BlobData, LockFile, StorageReader, StorageWriter};
 
 use crate::storage::BACKFILL_LOCK;
 
@@ -88,6 +89,9 @@ impl S3Storage {
         Ok(storage)
     }
 }
+
+#[async_trait]
+impl Storage for S3Storage {}
 
 #[async_trait]
 impl StorageReader for S3Storage {
