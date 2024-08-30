@@ -158,7 +158,7 @@ pub fn setup_tracing(
 
 #[derive(Parser, Serialize)]
 pub struct CliArgs {
-    #[clap(short = 'v', long, action = clap::ArgAction::Count, default_value = "3")]
+    #[clap(short = 'v', long, action = clap::ArgAction::Count, default_value = "2")]
     verbose: u8,
 
     #[clap(long)]
