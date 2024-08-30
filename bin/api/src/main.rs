@@ -1,23 +1,260 @@
+use std::fs;
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use clap::Parser;
+use ctrlc::set_handler;
+use eth2::types::Hash256;
+use eth2::{BeaconNodeHttpClient, SensitiveUrl, Timeouts};
+use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{fmt, EnvFilter};
+
+use blob_archiver_beacon::beacon_client;
+use blob_archiver_beacon::beacon_client::BeaconClientEth2;
+use blob_archiver_storage::fs::FSStorage;
+use blob_archiver_storage::s3::{S3Config, S3Storage};
+use blob_archiver_storage::storage;
+use blob_archiver_storage::storage::{Storage, StorageType};
+
 mod api;
 
 #[allow(dead_code)]
 static INIT: std::sync::Once = std::sync::Once::new();
 
-use clap::Parser;
+#[tokio::main]
+async fn main() {
+    let args = CliArgs::parse();
 
-fn main() {
-    println!("Hello, world!");
+    let config: Config = args.to_config();
+    init_logging(
+        config.log_config.verbose,
+        config.log_config.log_dir.clone(),
+        config
+            .log_config
+            .log_rotation
+            .clone()
+            .map(|s| to_rotation(s.as_str())),
+    );
+    let beacon_client = BeaconNodeHttpClient::new(
+        SensitiveUrl::from_str(config.beacon_config.beacon_endpoint.as_str()).unwrap(),
+        Timeouts::set_all(config.beacon_config.beacon_client_timeout),
+    );
+    let storage: Arc<Mutex<dyn Storage>> = if config.storage_config.storage_type == StorageType::FS
+    {
+        Arc::new(Mutex::new(
+            FSStorage::new(config.storage_config.fs_dir.clone().unwrap())
+                .await
+                .unwrap(),
+        ))
+    } else {
+        Arc::new(Mutex::new(
+            S3Storage::new(config.storage_config.s3_config.clone().unwrap())
+                .await
+                .unwrap(),
+        ))
+    };
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    set_handler(move || {
+        tracing::info!("shutting down");
+        shutdown_tx
+            .send(true)
+            .expect("could not send shutdown signal");
+    })
+    .expect("could not register shutdown handler");
+
+    let beacon_client_eth2 = BeaconClientEth2 { beacon_client };
+    let api = api::Api::new(Arc::new(Mutex::new(beacon_client_eth2)), storage.clone());
+    let addr: std::net::SocketAddr = config.listen_addr.parse().expect("Invalid listen address");
+
+    let (_, server) = warp::serve(api.routes())
+    .bind_with_graceful_shutdown(addr, async move {
+        shutdown_rx.clone().changed().await.ok();
+    });
+    server.await;
+
+}
+
+fn init_logging(verbose: u8, log_dir: Option<PathBuf>, rotation: Option<Rotation>) {
+    INIT.call_once(|| {
+        setup_tracing(verbose, log_dir, rotation).expect("Failed to setup tracing");
+    });
+}
+
+#[allow(dead_code)]
+pub fn setup_tracing(
+    verbose: u8,
+    log_dir: Option<PathBuf>,
+    rotation: Option<Rotation>,
+) -> eyre::Result<()> {
+    let filter = match verbose {
+        0 => EnvFilter::new("error"),
+        1 => EnvFilter::new("warn"),
+        2 => EnvFilter::new("info"),
+        3 => EnvFilter::new("debug"),
+        _ => EnvFilter::new("trace"),
+    };
+
+    let subscriber = tracing_subscriber::registry()
+        .with(EnvFilter::from_default_env())
+        .with(filter);
+
+    if let Some(log_dir) = log_dir {
+        fs::create_dir_all(&log_dir)
+            .map_err(|e| eyre::eyre!("Failed to create log directory: {}", e))?;
+
+        let file_appender = RollingFileAppender::new(
+            rotation.unwrap_or(Rotation::DAILY),
+            log_dir,
+            "blob-archiver.log",
+        );
+        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+        let file_layer = fmt::layer().with_writer(non_blocking).with_ansi(false);
+
+        subscriber
+            .with(file_layer)
+            .with(fmt::layer().with_writer(std::io::stdout))
+            .try_init()?;
+    } else {
+        subscriber
+            .with(fmt::layer().with_writer(std::io::stdout))
+            .try_init()?;
+    }
+
+    Ok(())
 }
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct CliArgs {
-    #[clap(short, long, value_parser, default_value = "config.toml")]
-    config: String,
-
-    #[clap(short, long, action = clap::ArgAction::Count)]
+    #[clap(short = 'v', long, action = clap::ArgAction::Count, default_value = "4")]
     verbose: u8,
 
-    #[clap(short, long)]
-    dry_run: bool,
+    #[clap(long)]
+    log_dir: Option<String>,
+
+    #[clap(long, help = "Log rotation values: DAILY, HOURLY, MINUTELY, NEVER")]
+    log_rotation: Option<String>,
+
+    #[clap(long, required = true)]
+    beacon_endpoint: String,
+
+    #[clap(long, default_value = "10")]
+    beacon_client_timeout: u64,
+
+    #[clap(long, default_value = "6")]
+    poll_interval: u64,
+
+    #[clap(long, default_value = "0.0.0.0:8000")]
+    listen_addr: String,
+
+    #[clap(long, required = true)]
+    origin_block: String,
+
+    #[clap(long, default_value = "s3")]
+    storage_type: String,
+
+    #[clap(long)]
+    s3_endpoint: Option<String>,
+
+    #[clap(long)]
+    s3_bucket: Option<String>,
+
+    #[clap(long)]
+    s3_path: Option<String>,
+
+    #[clap(long, default_value = "false")]
+    s3_compress: Option<bool>,
+    #[clap(long)]
+    fs_dir: Option<String>,
+}
+
+impl CliArgs {
+    fn to_config(&self) -> Config {
+        let log_config = LogConfig {
+            log_dir: self.log_dir.as_ref().map(PathBuf::from),
+            log_rotation: self.log_rotation.clone(),
+            verbose: self.verbose,
+        };
+
+        let beacon_config = beacon_client::Config {
+            beacon_endpoint: self.beacon_endpoint.clone(),
+            beacon_client_timeout: Duration::from_secs(self.beacon_client_timeout),
+        };
+
+        let storage_type = StorageType::from_str(self.storage_type.as_str()).unwrap();
+
+        let s3_config = if storage_type == StorageType::S3 {
+            Some(S3Config {
+                endpoint: self.s3_endpoint.clone().unwrap(),
+                bucket: self.s3_bucket.clone().unwrap(),
+                path: self.s3_path.clone().unwrap(),
+                compression: self.s3_compress.unwrap(),
+            })
+        } else {
+            None
+        };
+
+        let fs_dir = self.fs_dir.as_ref().map(PathBuf::from);
+
+        let storage_config = storage::Config {
+            storage_type,
+            s3_config,
+            fs_dir,
+        };
+
+        let mut padded_hex = self
+            .origin_block
+            .strip_prefix("0x")
+            .unwrap_or(&self.origin_block)
+            .to_string();
+        padded_hex = format!("{:0<64}", padded_hex);
+        let origin_block = Hash256::from_slice(&hex::decode(padded_hex).expect("Invalid hex"));
+
+        Config {
+            poll_interval: Duration::from_secs(self.poll_interval),
+            listen_addr: self.listen_addr.clone(),
+            origin_block,
+            beacon_config,
+            storage_config,
+            log_config,
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn to_rotation(s: &str) -> Rotation {
+    match s {
+        "DAILY" => Rotation::DAILY,
+        "HOURLY" => Rotation::HOURLY,
+        "MINUTELY" => Rotation::MINUTELY,
+        _ => Rotation::NEVER,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Default, Serialize, Deserialize)]
+pub struct LogConfig {
+    log_dir: Option<PathBuf>,
+    log_rotation: Option<String>,
+    verbose: u8,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Default, Serialize, Deserialize)]
+pub struct Config {
+    pub poll_interval: Duration,
+
+    pub listen_addr: String,
+
+    pub origin_block: Hash256,
+
+    pub beacon_config: beacon_client::Config,
+
+    pub storage_config: storage::Config,
+
+    pub log_config: LogConfig,
 }
