@@ -171,45 +171,45 @@ pub fn setup_tracing(
 
 #[derive(Parser, Serialize)]
 pub struct CliArgs {
-    #[clap(short = 'v', long, action = clap::ArgAction::Count, default_value = "2")]
+    #[clap(long, env = "VERBOSE", default_value = "2")]
     verbose: u8,
 
-    #[clap(long)]
+    #[clap(long, env = "LOG_DIR")]
     log_dir: Option<String>,
 
-    #[clap(long, help = "Log rotation values: DAILY, HOURLY, MINUTELY, NEVER")]
+    #[clap(long, env = "LOG_ROTATION", help = "Log rotation values: DAILY, HOURLY, MINUTELY, NEVER")]
     log_rotation: Option<String>,
 
-    #[clap(long, required = true)]
+    #[clap(long, env = "BEACON_ENDPOINT", required = true)]
     beacon_endpoint: String,
 
-    #[clap(long, default_value = "10")]
+    #[clap(long, env = "BEACON_CLIENT_TIMEOUT", default_value = "10")]
     beacon_client_timeout: u64,
 
-    #[clap(long, default_value = "6")]
+    #[clap(long, env = "POLL_INTERVAL", default_value = "6")]
     poll_interval: u64,
 
-    #[clap(long, default_value = "0.0.0.0:8000")]
+    #[clap(long, env = "LISTEN_ADDR", default_value = "0.0.0.0:8000")]
     listen_addr: String,
 
-    #[clap(long, required = true)]
+    #[clap(long, env = "ORIGIN_BLOCK", required = true)]
     origin_block: String,
 
-    #[clap(long, default_value = "s3")]
+    #[clap(long, env = "STORAGE_TYPE", default_value = "s3")]
     storage_type: String,
 
-    #[clap(long)]
+    #[clap(long, env = "S3_ENDPOINT")]
     s3_endpoint: Option<String>,
 
-    #[clap(long)]
+    #[clap(long, env = "S3_BUCKET")]
     s3_bucket: Option<String>,
 
-    #[clap(long)]
+    #[clap(long, env = "S3_PATH")]
     s3_path: Option<String>,
 
-    #[clap(long, default_value = "false")]
+    #[clap(long, env = "S3_COMPRESS", default_value = "false")]
     s3_compress: Option<bool>,
-    #[clap(long)]
+    #[clap(long, env = "FS_DIR")]
     fs_dir: Option<String>,
 }
 

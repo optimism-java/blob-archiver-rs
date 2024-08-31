@@ -8,12 +8,14 @@ use clap::Parser;
 use ctrlc::set_handler;
 use eth2::types::Hash256;
 use eth2::{BeaconNodeHttpClient, SensitiveUrl, Timeouts};
+use eyre::eyre;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+use tracing::Level;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_subscriber::fmt;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{fmt, EnvFilter};
 
 use blob_archiver_beacon::beacon_client;
 use blob_archiver_beacon::beacon_client::BeaconClientEth2;
@@ -72,12 +74,10 @@ async fn main() {
     let api = api::Api::new(Arc::new(Mutex::new(beacon_client_eth2)), storage.clone());
     let addr: std::net::SocketAddr = config.listen_addr.parse().expect("Invalid listen address");
 
-    let (_, server) = warp::serve(api.routes())
-    .bind_with_graceful_shutdown(addr, async move {
+    let (_, server) = warp::serve(api.routes()).bind_with_graceful_shutdown(addr, async move {
         shutdown_rx.clone().changed().await.ok();
     });
     server.await;
-
 }
 
 fn init_logging(verbose: u8, log_dir: Option<PathBuf>, rotation: Option<Rotation>) {
@@ -92,18 +92,6 @@ pub fn setup_tracing(
     log_dir: Option<PathBuf>,
     rotation: Option<Rotation>,
 ) -> eyre::Result<()> {
-    let filter = match verbose {
-        0 => EnvFilter::new("error"),
-        1 => EnvFilter::new("warn"),
-        2 => EnvFilter::new("info"),
-        3 => EnvFilter::new("debug"),
-        _ => EnvFilter::new("trace"),
-    };
-
-    let subscriber = tracing_subscriber::registry()
-        .with(EnvFilter::from_default_env())
-        .with(filter);
-
     if let Some(log_dir) = log_dir {
         fs::create_dir_all(&log_dir)
             .map_err(|e| eyre::eyre!("Failed to create log directory: {}", e))?;
@@ -114,63 +102,86 @@ pub fn setup_tracing(
             "blob-archiver.log",
         );
         let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-        let file_layer = fmt::layer().with_writer(non_blocking).with_ansi(false);
+        let file_layer = fmt::layer()
+            .with_writer(non_blocking.with_max_level(match verbose {
+                0 => Level::ERROR,
+                1 => Level::WARN,
+                2 => Level::INFO,
+                3 => Level::DEBUG,
+                _ => Level::TRACE,
+            }))
+            .with_ansi(false);
 
-        subscriber
-            .with(file_layer)
-            .with(fmt::layer().with_writer(std::io::stdout))
-            .try_init()?;
+        let subscriber =
+            tracing_subscriber::registry()
+                .with(file_layer)
+                .with(
+                    fmt::layer().with_writer(std::io::stdout.with_max_level(match verbose {
+                        0 => Level::ERROR,
+                        1 => Level::WARN,
+                        2 => Level::INFO,
+                        3 => Level::DEBUG,
+                        _ => Level::TRACE,
+                    })),
+                );
+        tracing::subscriber::set_global_default(subscriber).map_err(|e| eyre!(e))?;
     } else {
-        subscriber
-            .with(fmt::layer().with_writer(std::io::stdout))
-            .try_init()?;
+        let subscriber = tracing_subscriber::registry().with(fmt::layer().with_writer(
+            std::io::stdout.with_max_level(match verbose {
+                0 => Level::ERROR,
+                1 => Level::WARN,
+                2 => Level::INFO,
+                3 => Level::DEBUG,
+                _ => Level::TRACE,
+            }),
+        ));
+        tracing::subscriber::set_global_default(subscriber).map_err(|e| eyre!(e))?;
     }
-
     Ok(())
 }
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct CliArgs {
-    #[clap(short = 'v', long, action = clap::ArgAction::Count, default_value = "4")]
+    #[clap(long, env = "VERBOSE", default_value = "2")]
     verbose: u8,
 
-    #[clap(long)]
+    #[clap(long, env = "LOG_DIR")]
     log_dir: Option<String>,
 
-    #[clap(long, help = "Log rotation values: DAILY, HOURLY, MINUTELY, NEVER")]
+    #[clap(long, env = "LOG_ROTATION", help = "Log rotation values: DAILY, HOURLY, MINUTELY, NEVER")]
     log_rotation: Option<String>,
 
-    #[clap(long, required = true)]
+    #[clap(long, env = "BEACON_ENDPOINT", required = true)]
     beacon_endpoint: String,
 
-    #[clap(long, default_value = "10")]
+    #[clap(long, env = "BEACON_CLIENT_TIMEOUT", default_value = "10")]
     beacon_client_timeout: u64,
 
-    #[clap(long, default_value = "6")]
+    #[clap(long, env = "POLL_INTERVAL", default_value = "6")]
     poll_interval: u64,
 
-    #[clap(long, default_value = "0.0.0.0:8000")]
+    #[clap(long, env = "LISTEN_ADDR", default_value = "0.0.0.0:8000")]
     listen_addr: String,
 
-    #[clap(long, required = true)]
+    #[clap(long, env = "ORIGIN_BLOCK", required = true)]
     origin_block: String,
 
-    #[clap(long, default_value = "s3")]
+    #[clap(long, env = "STORAGE_TYPE", default_value = "s3")]
     storage_type: String,
 
-    #[clap(long)]
+    #[clap(long, env = "S3_ENDPOINT")]
     s3_endpoint: Option<String>,
 
-    #[clap(long)]
+    #[clap(long, env = "S3_BUCKET")]
     s3_bucket: Option<String>,
 
-    #[clap(long)]
+    #[clap(long, env = "S3_PATH")]
     s3_path: Option<String>,
 
-    #[clap(long, default_value = "false")]
+    #[clap(long, env = "S3_COMPRESS", default_value = "false")]
     s3_compress: Option<bool>,
-    #[clap(long)]
+    #[clap(long, env = "FS_DIR")]
     fs_dir: Option<String>,
 }
 

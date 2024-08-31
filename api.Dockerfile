@@ -10,7 +10,7 @@ WORKDIR /usr/src/blob-archiver-rs
 COPY . .
 
 # Build the project
-RUN cargo build --release -p archiver
+RUN cargo build --release -p api
 
 # Create a new stage with a minimal image
 FROM ubuntu:latest
@@ -19,7 +19,7 @@ FROM ubuntu:latest
 RUN apt-get update && apt-get install -y openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 
 # Copy the built binary from the builder stage
-COPY --from=builder /usr/src/blob-archiver-rs/target/release/archiver /usr/local/bin/archiver
+COPY --from=builder /usr/src/blob-archiver-rs/target/release/api /usr/local/bin/api
 
 # Set the entrypoint
-ENTRYPOINT ["archiver"]
+ENTRYPOINT ["api"]
