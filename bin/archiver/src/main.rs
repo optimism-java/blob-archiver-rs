@@ -5,24 +5,25 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use again::RetryPolicy;
-use clap::Parser;
-use ctrlc::set_handler;
-use eth2::types::{BlockId, Hash256};
-use eth2::{BeaconNodeHttpClient, SensitiveUrl, Timeouts};
-use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
-use tracing::log::error;
-use tracing_appender::rolling::{RollingFileAppender, Rotation};
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{fmt, EnvFilter};
-
 use blob_archiver_beacon::beacon_client;
 use blob_archiver_beacon::beacon_client::BeaconClientEth2;
 use blob_archiver_storage::fs::FSStorage;
 use blob_archiver_storage::s3::{S3Config, S3Storage};
 use blob_archiver_storage::storage;
 use blob_archiver_storage::storage::{Storage, StorageType};
+use clap::Parser;
+use ctrlc::set_handler;
+use eth2::types::{BlockId, Hash256};
+use eth2::{BeaconNodeHttpClient, SensitiveUrl, Timeouts};
+use eyre::eyre;
+use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
+use tracing::log::error;
+use tracing::Level;
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_subscriber::fmt;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
+use tracing_subscriber::layer::SubscriberExt;
 
 use crate::archiver::{Archiver, Config, STARTUP_FETCH_BLOB_MAXIMUM_RETRIES};
 
@@ -119,18 +120,6 @@ pub fn setup_tracing(
     log_dir: Option<PathBuf>,
     rotation: Option<Rotation>,
 ) -> eyre::Result<()> {
-    let filter = match verbose {
-        0 => EnvFilter::new("error"),
-        1 => EnvFilter::new("warn"),
-        2 => EnvFilter::new("info"),
-        3 => EnvFilter::new("debug"),
-        _ => EnvFilter::new("trace"),
-    };
-
-    let subscriber = tracing_subscriber::registry()
-        .with(EnvFilter::from_default_env())
-        .with(filter);
-
     if let Some(log_dir) = log_dir {
         fs::create_dir_all(&log_dir)
             .map_err(|e| eyre::eyre!("Failed to create log directory: {}", e))?;
@@ -141,19 +130,43 @@ pub fn setup_tracing(
             "blob-archiver.log",
         );
         let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-        let file_layer = fmt::layer().with_writer(non_blocking).with_ansi(false);
+        let file_layer = fmt::layer()
+            .with_writer(non_blocking.with_max_level(match verbose {
+                0 => Level::ERROR,
+                1 => Level::WARN,
+                2 => Level::INFO,
+                3 => Level::DEBUG,
+                _ => Level::TRACE,
+            }))
+            .with_ansi(false);
 
-        subscriber
-            .with(file_layer)
-            .with(fmt::layer().with_writer(std::io::stdout))
-            .try_init()?;
+        let subscriber =
+            tracing_subscriber::registry()
+                .with(file_layer)
+                .with(
+                    fmt::layer().with_writer(std::io::stdout.with_max_level(match verbose {
+                        0 => Level::ERROR,
+                        1 => Level::WARN,
+                        2 => Level::INFO,
+                        3 => Level::DEBUG,
+                        _ => Level::TRACE,
+                    })),
+                );
+        tracing::subscriber::set_global_default(subscriber).map_err(|e| eyre!(e))?;
+        Ok(())
     } else {
-        subscriber
-            .with(fmt::layer().with_writer(std::io::stdout))
-            .try_init()?;
+        let subscriber = tracing_subscriber::registry().with(fmt::layer().with_writer(
+            std::io::stdout.with_max_level(match verbose {
+                0 => Level::ERROR,
+                1 => Level::WARN,
+                2 => Level::INFO,
+                3 => Level::DEBUG,
+                _ => Level::TRACE,
+            }),
+        ));
+        tracing::subscriber::set_global_default(subscriber).map_err(|e| eyre!(e))?;
+        Ok(())
     }
-
-    Ok(())
 }
 
 #[derive(Parser, Serialize)]
