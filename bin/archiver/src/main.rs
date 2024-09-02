@@ -177,7 +177,11 @@ pub struct CliArgs {
     #[clap(long, env = "LOG_DIR")]
     log_dir: Option<String>,
 
-    #[clap(long, env = "LOG_ROTATION", help = "Log rotation values: DAILY, HOURLY, MINUTELY, NEVER")]
+    #[clap(
+        long,
+        env = "LOG_ROTATION",
+        help = "Log rotation values: DAILY, HOURLY, MINUTELY, NEVER"
+    )]
     log_rotation: Option<String>,
 
     #[clap(long, env = "BEACON_ENDPOINT", required = true)]
