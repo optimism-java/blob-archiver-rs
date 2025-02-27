@@ -41,11 +41,3 @@ jobs:
           file: ./api.Dockerfile
           push: true
           tags: ${{ env.REGISTRY }}/${{ github.repository }}-api:latest
-
-      - name: Build and push archiver Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./archiver.Dockerfile
-          push: true
-          tags: ${{ env.REGISTRY }}/${{ github.repository }}-archiver:latest
