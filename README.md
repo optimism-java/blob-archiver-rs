@@ -55,6 +55,13 @@ curl -X 'GET' 'http://localhost:8000/eth/v1/beacon/blob_sidecars/head' -H 'accep
 curl -X 'GET' 'http://localhost:8000/eth/v1/beacon/blob_sidecars/7111008' -H 'accept: application/json'
 ```
 
+#### Storage Dashboard
+MinIO has started the dashboard, allowing you to view the status of blob storage.
+By default, you can access it directly at:
+```http
+http://localhost:9999
+```
+
 ##  Options
 
 ### `verbose`
