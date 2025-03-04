@@ -12,15 +12,27 @@ services:
     depends_on:
       - minio
       - create-buckets
+    entrypoint: >
+      /bin/sh -c "
+      sleep 2;
+      api;
+      "
   archiver:
     build:
       context: .
       dockerfile: archiver.Dockerfile
     env_file:
       - .env
+    ports:
+      - "8001:8000"
     depends_on:
       - minio
       - create-buckets
+    entrypoint: >
+      /bin/sh -c "
+      sleep 2;
+      archiver;
+      "
   minio:
     restart: unless-stopped
     image: minio/minio:latest
@@ -37,6 +49,7 @@ services:
       - minio
     entrypoint: >
       /bin/sh -c "
+      sleep 1;
       /usr/bin/mc alias set minio http://minio:9000 admin password;
       /usr/bin/mc mb minio/blobs;
       /usr/bin/mc anonymous set public minio/blobs;

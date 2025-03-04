@@ -41,6 +41,27 @@ to your beacon client and storage backend of choice. Then you can run the projec
 docker compose up
 ```
 
+#### Get blobs
+After successfully starting the service, you can use the following command to obtain the blob:
+
+- get blob by block id from api service:
+```shell
+# also there is support other type of block id, like: finalized,justified.
+curl -X 'GET' 'http://localhost:8000/eth/v1/beacon/blob_sidecars/head' -H 'accept: application/json'
+```
+
+- get blob by slot number from api service:
+```shell
+curl -X 'GET' 'http://localhost:8000/eth/v1/beacon/blob_sidecars/7111008' -H 'accept: application/json'
+```
+
+#### Storage Dashboard
+MinIO has started the dashboard, allowing you to view the status of blob storage.
+By default, you can access it directly at:
+```http
+http://localhost:9999
+```
+
 ##  Options
 
 ### `verbose`
