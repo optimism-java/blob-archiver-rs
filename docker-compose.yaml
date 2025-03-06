@@ -14,7 +14,7 @@ services:
       - create-buckets
     entrypoint: >
       /bin/sh -c "
-      sleep 2;
+      sleep 4;
       api;
       "
   archiver:
@@ -30,7 +30,7 @@ services:
       - create-buckets
     entrypoint: >
       /bin/sh -c "
-      sleep 2;
+      sleep 4;
       archiver;
       "
   minio:
@@ -49,7 +49,7 @@ services:
       - minio
     entrypoint: >
       /bin/sh -c "
-      sleep 1;
+      sleep 3;
       /usr/bin/mc alias set minio http://minio:9000 admin password;
       /usr/bin/mc mb minio/blobs;
       /usr/bin/mc anonymous set public minio/blobs;
